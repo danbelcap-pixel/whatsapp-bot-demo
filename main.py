@@ -1,0 +1,90 @@
+import logging
+import os
+
+import requests
+from dotenv import load_dotenv
+from flask import Flask, request
+
+from agent.client import ask_agent
+
+load_dotenv()
+
+logging.basicConfig(
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    level=logging.INFO,
+)
+log = logging.getLogger("whatsapp-bot")
+
+app = Flask(__name__)
+
+GRAPH_API_VERSION = "v21.0"
+
+
+def send_whatsapp_message(to: str, body: str) -> None:
+    token = os.getenv("WHATSAPP_TOKEN")
+    phone_number_id = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
+    url = f"https://graph.facebook.com/{GRAPH_API_VERSION}/{phone_number_id}/messages"
+
+    resp = requests.post(
+        url,
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "messaging_product": "whatsapp",
+            "to": to,
+            "type": "text",
+            "text": {"body": body},
+        },
+        timeout=15,
+    )
+    if resp.status_code >= 400:
+        log.error("Error enviando mensaje a WhatsApp: %s %s", resp.status_code, resp.text)
+
+
+@app.get("/webhook")
+def verify_webhook():
+    mode = request.args.get("hub.mode")
+    token = request.args.get("hub.verify_token")
+    challenge = request.args.get("hub.challenge")
+
+    expected_token = os.getenv("WHATSAPP_VERIFY_TOKEN")
+    if mode == "subscribe" and token == expected_token:
+        log.info("Webhook verificado por Meta.")
+        return challenge, 200
+
+    log.warning("Verificación de webhook fallida (token no coincide).")
+    return "Forbidden", 403
+
+
+@app.post("/webhook")
+def receive_message():
+    payload = request.get_json(silent=True) or {}
+
+    try:
+        change_value = payload["entry"][0]["changes"][0]["value"]
+        messages = change_value.get("messages")
+        if not messages:
+            # Eventos que no son mensajes entrantes (estados de entrega, etc.)
+            return "OK", 200
+
+        incoming = messages[0]
+        wa_id = incoming["from"]
+        text = incoming.get("text", {}).get("body", "")
+    except (KeyError, IndexError):
+        log.warning("Payload de webhook con formato inesperado: %s", payload)
+        return "OK", 200
+
+    log.info("Mensaje de %s: %s", wa_id, text)
+    reply = ask_agent(wa_id, text)
+    send_whatsapp_message(wa_id, reply)
+
+    return "OK", 200
+
+
+@app.get("/")
+def health():
+    return "WhatsApp bot demo activo", 200
+
+
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 8000))
+    app.run(host="0.0.0.0", port=port)
