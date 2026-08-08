@@ -28,7 +28,7 @@ def normalize_mx_number(wa_id: str) -> str:
     return wa_id
 
 
-def send_whatsapp_message(to: str, body: str, _is_alert: bool = False) -> None:
+def send_whatsapp_message(to: str, body: str) -> None:
     token = os.getenv("WHATSAPP_TOKEN")
     phone_number_id = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
     url = f"https://graph.facebook.com/{GRAPH_API_VERSION}/{phone_number_id}/messages"
@@ -46,17 +46,25 @@ def send_whatsapp_message(to: str, body: str, _is_alert: bool = False) -> None:
     )
     if resp.status_code >= 400:
         log.error("Error enviando mensaje a WhatsApp: %s %s", resp.status_code, resp.text)
-        # _is_alert evita un bucle infinito si la propia alerta falla al enviarse
-        if not _is_alert:
-            alert_daniel(f"Fallo al enviar mensaje a {to}: HTTP {resp.status_code} — {resp.text[:200]}")
+        alert_daniel(f"Fallo al enviar mensaje a {to}: HTTP {resp.status_code} — {resp.text[:200]}")
 
 
 def alert_daniel(message: str) -> None:
-    alert_number = os.getenv("ALERT_PHONE_DANIEL")
-    if not alert_number:
+    """Manda la alerta por Telegram: canal independiente de WhatsApp/Meta,
+    para que siga funcionando aunque WhatsApp sea justo lo que está fallando."""
+    bot_token = os.getenv("TELEGRAM_ALERT_BOT_TOKEN")
+    chat_id = os.getenv("TELEGRAM_ALERT_CHAT_ID")
+    if not bot_token or not chat_id:
         return
     negocio = os.getenv("BUSINESS_NAME", "bot")
-    send_whatsapp_message(alert_number, f"⚠️ [{negocio}] {message}", _is_alert=True)
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{bot_token}/sendMessage",
+            json={"chat_id": chat_id, "text": f"⚠️ [{negocio}] {message}"},
+            timeout=10,
+        )
+    except requests.RequestException:
+        log.exception("No se pudo mandar la alerta por Telegram")
 
 
 @app.get("/webhook")
