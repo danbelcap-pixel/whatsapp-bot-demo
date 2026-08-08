@@ -19,6 +19,10 @@ app = Flask(__name__)
 
 GRAPH_API_VERSION = "v21.0"
 
+# Solicitudes de cita esperando que el dueño del negocio las confirme (FIFO).
+# En memoria: se pierde si el servicio se reinicia, suficiente para la demo.
+_pending_requests: list[dict] = []
+
 
 def normalize_mx_number(wa_id: str) -> str:
     """Meta antepone un '1' extra tras el '52' en el campo 'from' de
@@ -67,6 +71,54 @@ def alert_daniel(message: str) -> None:
         log.exception("No se pudo mandar la alerta por Telegram")
 
 
+def notify_owner_new_request(req: dict) -> None:
+    owner = os.getenv("OWNER_PHONE_NUMBER")
+    if not owner:
+        alert_daniel(
+            f"Se pidió una cita pero OWNER_PHONE_NUMBER no está configurado: {req}"
+        )
+        return
+    send_whatsapp_message(
+        owner,
+        f"📅 Nueva solicitud de cita\n"
+        f"Nombre: {req['nombre']}\n"
+        f"Servicio: {req['servicio']}\n"
+        f"Horario pedido: {req['horario']}\n\n"
+        f"Contesta *SI* para confirmar, *NO* para rechazar, u otro horario "
+        f"para proponer un cambio.",
+    )
+
+
+def handle_owner_reply(text: str) -> None:
+    owner = os.getenv("OWNER_PHONE_NUMBER")
+    if not _pending_requests:
+        send_whatsapp_message(owner, "No tengo ninguna solicitud de cita pendiente ahora mismo.")
+        return
+
+    req = _pending_requests.pop(0)
+    reply_normalized = text.strip().lower()
+
+    if reply_normalized in ("si", "sí", "yes", "ok", "dale"):
+        send_whatsapp_message(
+            req["customer_wa_id"],
+            f"¡Confirmado! Tu cita para {req['servicio']} quedó agendada "
+            f"el {req['horario']}. Te esperamos 🙌",
+        )
+    elif reply_normalized == "no":
+        send_whatsapp_message(
+            req["customer_wa_id"],
+            "Ese horario no está disponible. ¿Tienes otro horario que te "
+            "funcione? Escríbenos de nuevo para revisar otra opción.",
+        )
+    else:
+        # El dueño escribió un horario alternativo en texto libre
+        send_whatsapp_message(
+            req["customer_wa_id"],
+            f"Tu horario solicitado no estaba disponible, pero te "
+            f"proponemos: {text}. ¿Te funciona?",
+        )
+
+
 @app.get("/webhook")
 def verify_webhook():
     mode = request.args.get("hub.mode")
@@ -101,8 +153,19 @@ def receive_message():
         return "OK", 200
 
     log.info("Mensaje de %s: %s", wa_id, text)
-    reply = ask_agent(wa_id, text)
+
+    owner = os.getenv("OWNER_PHONE_NUMBER")
+    if owner and wa_id == owner:
+        handle_owner_reply(text)
+        return "OK", 200
+
+    reply, booking_request = ask_agent(wa_id, text)
     send_whatsapp_message(wa_id, reply)
+
+    if booking_request:
+        booking_request["customer_wa_id"] = wa_id
+        _pending_requests.append(booking_request)
+        notify_owner_new_request(booking_request)
 
     return "OK", 200
 
