@@ -20,6 +20,14 @@ app = Flask(__name__)
 GRAPH_API_VERSION = "v21.0"
 
 
+def normalize_mx_number(wa_id: str) -> str:
+    """Meta antepone un '1' extra tras el '52' en el campo 'from' de
+    mensajes entrantes de México, pero no lo acepta al enviar/autorizar."""
+    if wa_id.startswith("521") and len(wa_id) == 13:
+        return "52" + wa_id[3:]
+    return wa_id
+
+
 def send_whatsapp_message(to: str, body: str) -> None:
     token = os.getenv("WHATSAPP_TOKEN")
     phone_number_id = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
@@ -67,7 +75,7 @@ def receive_message():
             return "OK", 200
 
         incoming = messages[0]
-        wa_id = incoming["from"]
+        wa_id = normalize_mx_number(incoming["from"])
         text = incoming.get("text", {}).get("body", "")
     except (KeyError, IndexError):
         log.warning("Payload de webhook con formato inesperado: %s", payload)
