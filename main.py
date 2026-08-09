@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from flask import Flask, request
 
 from agent.client import ask_agent
+from services.sheets import log_event
 
 load_dotenv()
 
@@ -51,6 +52,7 @@ def send_whatsapp_message(to: str, body: str) -> None:
     if resp.status_code >= 400:
         log.error("Error enviando mensaje a WhatsApp: %s %s", resp.status_code, resp.text)
         alert_daniel(f"Fallo al enviar mensaje a {to}: HTTP {resp.status_code} — {resp.text[:200]}")
+        log_event("error_envio", f"HTTP {resp.status_code} a {to}")
 
 
 def alert_daniel(message: str) -> None:
@@ -104,12 +106,14 @@ def handle_owner_reply(text: str) -> None:
             f"¡Confirmado! Tu cita para {req['servicio']} quedó agendada "
             f"el {req['horario']}. Te esperamos 🙌",
         )
+        log_event("cita_confirmada", f"{req['nombre']} - {req['servicio']} - {req['horario']}")
     elif reply_normalized == "no":
         send_whatsapp_message(
             req["customer_wa_id"],
             "Ese horario no está disponible. ¿Tienes otro horario que te "
             "funcione? Escríbenos de nuevo para revisar otra opción.",
         )
+        log_event("cita_rechazada", f"{req['nombre']} - {req['servicio']} - {req['horario']}")
     else:
         # El dueño escribió un horario alternativo en texto libre
         send_whatsapp_message(
@@ -117,6 +121,7 @@ def handle_owner_reply(text: str) -> None:
             f"Tu horario solicitado no estaba disponible, pero te "
             f"proponemos: {text}. ¿Te funciona?",
         )
+        log_event("cita_horario_alternativo", f"{req['nombre']} - propuesta: {text}")
 
 
 @app.get("/webhook")
@@ -161,11 +166,16 @@ def receive_message():
 
     reply, booking_request = ask_agent(wa_id, text)
     send_whatsapp_message(wa_id, reply)
+    log_event("mensaje_respondido", text[:200])
 
     if booking_request:
         booking_request["customer_wa_id"] = wa_id
         _pending_requests.append(booking_request)
         notify_owner_new_request(booking_request)
+        log_event(
+            "cita_solicitada",
+            f"{booking_request['nombre']} - {booking_request['servicio']} - {booking_request['horario']}",
+        )
 
     return "OK", 200
 
