@@ -268,9 +268,19 @@ def receive_message():
         log_event("mensaje_no_soportado")
         return "OK", 200
 
-    reply, booking_request = ask_agent(wa_id, user_content, stored_message=stored_content)
+    reply, booking_request, hallucination_detected = ask_agent(
+        wa_id, user_content, stored_message=stored_content
+    )
     send_whatsapp_message(wa_id, reply)
     log_event("mensaje_respondido")
+
+    if hallucination_detected:
+        alert_daniel(
+            f"El bot casi le confirma una cita falsa a {wa_id} sin usar la "
+            f"herramienta real — se bloqueó automáticamente, pero revisa el "
+            f"prompt, esto no debería pasar."
+        )
+        log_event("alucinacion_detectada")
 
     if booking_request:
         folio = add_pending_appointment(wa_id, booking_request)

@@ -16,6 +16,7 @@ _known_tabs: set[str] = set()
 SUMMARY_HEADERS = [
     "Fecha", "Mensajes", "Citas solicitadas", "Citas confirmadas",
     "Citas rechazadas", "Errores", "No soportados (audio/sticker/etc)",
+    "Alucinaciones bloqueadas",
 ]
 EVENT_COLUMN = {
     "mensaje_respondido": 1,
@@ -23,6 +24,7 @@ EVENT_COLUMN = {
     "cita_confirmada": 3,
     "cita_rechazada": 4,
     "error_envio": 5,
+    "alucinacion_detectada": 7,
     "mensaje_no_soportado": 6,
 }
 

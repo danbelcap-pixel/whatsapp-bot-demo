@@ -8,6 +8,15 @@ MODEL = "claude-opus-4-7"
 MAX_TOKENS = 1024
 MAX_HISTORY_MESSAGES = 20
 
+# Frases que suenan a "ya registré tu cita" — si aparecen en el texto SIN que
+# se haya usado la herramienta solicitar_cita en ese turno, es una alucinación
+# del modelo (dice que hizo algo que no hizo) y hay que bloquearla, no confiar
+# únicamente en que el prompt se respete siempre.
+_FAKE_CONFIRMATION_MARKERS = [
+    "✅", "ya tengo tu solicitud", "ya registr", "queda registrad",
+    "solicitud registrada", "cita registrada", "ya quedó registrad",
+]
+
 _client: Anthropic | None = None
 
 
@@ -57,11 +66,19 @@ LO QUE SÍ PUEDES HACER (lo único real):
 - Responder preguntas 24/7 sobre este negocio (horarios, ubicación,
   servicios, precios) usando la información que se te haya dado.
 - Tomar solicitudes de cita: si el cliente quiere agendar, pídele nombre,
-  servicio y horario preferido, y cuando tengas los tres datos usa la
-  herramienta "solicitar_cita". Esto NO confirma la cita todavía — el
-  negocio tiene que aprobar el horario primero, así que después de usar la
-  herramienta dile al cliente que estás confirmando disponibilidad y que en
-  breve le avisas (no digas "confirmado" hasta que el sistema te lo indique).
+  servicio y horario preferido. En cuanto tengas los tres datos, tu ÚNICA
+  acción posible es usar la herramienta "solicitar_cita" — no existe otra
+  forma de registrar una solicitud.
+
+REGLA CRÍTICA, sin excepción: tener los tres datos y NO usar la herramienta
+"solicitar_cita" en ese mismo turno es un error grave — nunca digas frases
+como "ya tengo tu solicitud registrada", "✅", o cualquier variante que
+suene a que ya se guardó algo, a menos que hayas usado la herramienta
+realmente en este turno. Si no la usas, no digas que registraste nada.
+Usar la herramienta NO confirma la cita todavía — el negocio tiene que
+aprobar el horario primero, así que el mensaje correcto después de usarla
+es que estás confirmando disponibilidad y en breve avisas (nunca digas
+"confirmado" hasta que el sistema te lo indique más adelante).
 
 LO QUE NO PUEDES HACER, aunque te lo pregunten — sé honesto, nunca digas que
 sí puedes: no puedes tomar pedidos de productos ni registrarlos en ningún
@@ -93,10 +110,13 @@ def ask_agent(
     wa_id: str,
     user_message: str | list[dict],
     stored_message: str | list[dict] | None = None,
-) -> tuple[str, dict | None]:
-    """Devuelve (texto_para_el_cliente, solicitud_de_cita).
+) -> tuple[str, dict | None, bool]:
+    """Devuelve (texto_para_el_cliente, solicitud_de_cita, alucinacion_detectada).
     solicitud_de_cita es None salvo que Claude haya usado la herramienta
     solicitar_cita, en cuyo caso trae {"nombre", "servicio", "horario"}.
+    alucinacion_detectada es True si se bloqueó un mensaje que sonaba a
+    confirmación falsa (ver _FAKE_CONFIRMATION_MARKERS) — señal de que el
+    prompt no se respetó y vale la pena que alguien lo revise.
 
     stored_message: si se da, esto es lo que se GUARDA en el historial en
     vez de user_message — para no arrastrar contenido pesado (fotos en
@@ -149,11 +169,23 @@ def ask_agent(
             f"{booking_request['servicio']} el {booking_request['horario']}. "
             f"En un momento te aviso si el horario está disponible 🙌"
         )
-    else:
+    hallucination_detected = False
+    if not tool_use_block:
         reply = text
+        lowered = reply.lower()
+        if any(marker.lower() in lowered for marker in _FAKE_CONFIRMATION_MARKERS):
+            hallucination_detected = True
+            reply = (
+                "Para tomar bien tu solicitud, ¿me confirmas tu nombre, el "
+                "servicio que necesitas y el horario que buscas?"
+            )
+            # También limpiamos el mensaje falso del historial guardado,
+            # para que Claude no vea su propia alucinación en turnos futuros.
+            content = [{"type": "text", "text": reply}]
+            history[-1] = {"role": "assistant", "content": content}
 
     if stored_message is not None:
         history[user_index] = {"role": "user", "content": stored_message}
 
     _save_history(wa_id, _trim(history))
-    return reply, booking_request
+    return reply, booking_request, hallucination_detected
