@@ -6,7 +6,12 @@ from dotenv import load_dotenv
 from flask import Flask, request
 
 from agent.client import ask_agent
-from services.sheets import log_event
+from services.sheets import (
+    add_pending_appointment,
+    get_oldest_pending_appointment,
+    log_event,
+    mark_appointment_resolved,
+)
 
 load_dotenv()
 
@@ -19,10 +24,6 @@ log = logging.getLogger("whatsapp-bot")
 app = Flask(__name__)
 
 GRAPH_API_VERSION = "v21.0"
-
-# Solicitudes de cita esperando que el dueño del negocio las confirme (FIFO).
-# En memoria: se pierde si el servicio se reinicia, suficiente para la demo.
-_pending_requests: list[dict] = []
 
 
 def normalize_mx_number(wa_id: str) -> str:
@@ -93,11 +94,11 @@ def notify_owner_new_request(req: dict) -> None:
 
 def handle_owner_reply(text: str) -> None:
     owner = os.getenv("OWNER_PHONE_NUMBER")
-    if not _pending_requests:
+    req = get_oldest_pending_appointment()
+    if not req:
         send_whatsapp_message(owner, "No tengo ninguna solicitud de cita pendiente ahora mismo.")
         return
 
-    req = _pending_requests.pop(0)
     reply_normalized = text.strip().lower()
 
     if reply_normalized in ("si", "sí", "yes", "ok", "dale"):
@@ -106,6 +107,7 @@ def handle_owner_reply(text: str) -> None:
             f"¡Confirmado! Tu cita para {req['servicio']} quedó agendada "
             f"el {req['horario']}. Te esperamos 🙌",
         )
+        mark_appointment_resolved(req["row_number"], "confirmada")
         log_event("cita_confirmada", f"{req['nombre']} - {req['servicio']} - {req['horario']}")
     elif reply_normalized == "no":
         send_whatsapp_message(
@@ -113,6 +115,7 @@ def handle_owner_reply(text: str) -> None:
             "Ese horario no está disponible. ¿Tienes otro horario que te "
             "funcione? Escríbenos de nuevo para revisar otra opción.",
         )
+        mark_appointment_resolved(req["row_number"], "rechazada")
         log_event("cita_rechazada", f"{req['nombre']} - {req['servicio']} - {req['horario']}")
     else:
         # El dueño escribió un horario alternativo en texto libre
@@ -121,6 +124,7 @@ def handle_owner_reply(text: str) -> None:
             f"Tu horario solicitado no estaba disponible, pero te "
             f"proponemos: {text}. ¿Te funciona?",
         )
+        mark_appointment_resolved(req["row_number"], f"horario_alternativo: {text[:100]}")
         log_event("cita_horario_alternativo", f"{req['nombre']} - propuesta: {text}")
 
 
@@ -169,8 +173,8 @@ def receive_message():
     log_event("mensaje_respondido", text[:200])
 
     if booking_request:
+        add_pending_appointment(wa_id, booking_request)
         booking_request["customer_wa_id"] = wa_id
-        _pending_requests.append(booking_request)
         notify_owner_new_request(booking_request)
         log_event(
             "cita_solicitada",
