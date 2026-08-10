@@ -126,31 +126,23 @@ def ask_agent(
     user_index = len(history)
     history.append({"role": "user", "content": user_message})
 
-    message = get_client().messages.create(
-        model=MODEL,
-        max_tokens=MAX_TOKENS,
-        system=[
-            {
-                "type": "text",
-                "text": _system_prompt(),
-                "cache_control": {"type": "ephemeral"},
-            }
-        ],
-        tools=[BOOKING_TOOL],
-        messages=history,
-    )
-    # .model_dump() convierte los bloques del SDK a dicts planos, para poder
-    # guardarlos como JSON en Redis (los objetos del SDK no son serializables).
-    content = [block.model_dump() for block in message.content]
+    content, text, tool_use_block = _call_claude(history)
     history.append({"role": "assistant", "content": content})
 
-    text = "".join(b["text"] for b in content if b.get("type") == "text").strip()
+    hallucination_detected = False
+    if not tool_use_block and _looks_like_fake_confirmation(text):
+        # Claude actuó como si ya tuviera todo listo pero no usó la
+        # herramienta — en vez de hacer que el cliente repita datos que ya
+        # dio, se lo forzamos en un segundo intento antes de rendirnos.
+        hallucination_detected = True
+        retry_content, _, retry_tool_block = _call_claude(
+            history[:-1], force_booking_tool=True
+        )
+        if retry_tool_block:
+            content, tool_use_block = retry_content, retry_tool_block
+            history[-1] = {"role": "assistant", "content": content}
 
     booking_request = None
-    tool_use_block = next(
-        (b for b in content if b.get("type") == "tool_use" and b.get("name") == "solicitar_cita"),
-        None,
-    )
     if tool_use_block:
         booking_request = dict(tool_use_block["input"])
         # La API exige un tool_result antes del siguiente turno; lo simulamos
@@ -169,23 +161,58 @@ def ask_agent(
             f"{booking_request['servicio']} el {booking_request['horario']}. "
             f"En un momento te aviso si el horario está disponible 🙌"
         )
-    hallucination_detected = False
-    if not tool_use_block:
+    elif hallucination_detected:
+        # Ni el intento normal ni el forzado lograron una herramienta real —
+        # no había suficiente info de verdad. No repetimos el texto
+        # alucinado del primer intento, pedimos los datos de forma segura.
+        reply = (
+            "Para tomar bien tu solicitud, ¿me confirmas tu nombre, el "
+            "servicio que necesitas y el horario que buscas?"
+        )
+        history[-1] = {"role": "assistant", "content": [{"type": "text", "text": reply}]}
+    else:
+        # Caso normal: Claude pidió info faltante (o contestó cualquier otra
+        # cosa) con su propio texto, sin alucinar nada — se usa tal cual.
         reply = text
-        lowered = reply.lower()
-        if any(marker.lower() in lowered for marker in _FAKE_CONFIRMATION_MARKERS):
-            hallucination_detected = True
-            reply = (
-                "Para tomar bien tu solicitud, ¿me confirmas tu nombre, el "
-                "servicio que necesitas y el horario que buscas?"
-            )
-            # También limpiamos el mensaje falso del historial guardado,
-            # para que Claude no vea su propia alucinación en turnos futuros.
-            content = [{"type": "text", "text": reply}]
-            history[-1] = {"role": "assistant", "content": content}
 
     if stored_message is not None:
         history[user_index] = {"role": "user", "content": stored_message}
 
     _save_history(wa_id, _trim(history))
     return reply, booking_request, hallucination_detected
+
+
+def _call_claude(
+    history: list[dict], force_booking_tool: bool = False
+) -> tuple[list[dict], str, dict | None]:
+    """Llama a Claude y devuelve (content_serializable, texto, tool_use_block)."""
+    message = get_client().messages.create(
+        model=MODEL,
+        max_tokens=MAX_TOKENS,
+        system=[
+            {
+                "type": "text",
+                "text": _system_prompt(),
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
+        tools=[BOOKING_TOOL],
+        tool_choice=(
+            {"type": "tool", "name": "solicitar_cita"} if force_booking_tool else {"type": "auto"}
+        ),
+        messages=history,
+    )
+    # .model_dump() convierte los bloques del SDK a dicts planos, para poder
+    # guardarlos como JSON en Redis (los objetos del SDK no son serializables).
+    content = [block.model_dump() for block in message.content]
+    text = "".join(b["text"] for b in content if b.get("type") == "text").strip()
+    tool_use_block = next(
+        (b for b in content if b.get("type") == "tool_use" and b.get("name") == "solicitar_cita"),
+        None,
+    )
+    return content, text, tool_use_block
+
+
+def _looks_like_fake_confirmation(text: str) -> bool:
+    lowered = text.lower()
+    return any(marker.lower() in lowered for marker in _FAKE_CONFIRMATION_MARKERS)
