@@ -1,12 +1,14 @@
 import os
 from anthropic import Anthropic
 
+from services.memory import get_history as _load_history
+from services.memory import save_history as _save_history
+
 MODEL = "claude-opus-4-7"
 MAX_TOKENS = 1024
 MAX_HISTORY_MESSAGES = 20
 
 _client: Anthropic | None = None
-_conversation_histories: dict[str, list[dict]] = {}
 
 
 def get_client() -> Anthropic:
@@ -73,29 +75,25 @@ agente de IA conectado a WhatsApp que puede automatizar respuestas y toma de
 citas 24/7 para negocios reales."""
 
 
-def get_history(wa_id: str) -> list[dict]:
-    return _conversation_histories.setdefault(wa_id, [])
-
-
-def _trim_history(wa_id: str) -> None:
-    history = _conversation_histories.get(wa_id, [])
-    if len(history) > MAX_HISTORY_MESSAGES:
-        trimmed = history[-MAX_HISTORY_MESSAGES:]
-        # Evita dejar un tool_result huérfano al inicio si el corte cayó
-        # justo a la mitad de un par tool_use/tool_result
-        first_content = trimmed[0].get("content") if trimmed else None
-        if isinstance(first_content, list) and any(
-            isinstance(c, dict) and c.get("type") == "tool_result" for c in first_content
-        ):
-            trimmed = trimmed[1:]
-        _conversation_histories[wa_id] = trimmed
+def _trim(history: list[dict]) -> list[dict]:
+    if len(history) <= MAX_HISTORY_MESSAGES:
+        return history
+    trimmed = history[-MAX_HISTORY_MESSAGES:]
+    # Evita dejar un tool_result huérfano al inicio si el corte cayó
+    # justo a la mitad de un par tool_use/tool_result
+    first_content = trimmed[0].get("content") if trimmed else None
+    if isinstance(first_content, list) and any(
+        isinstance(c, dict) and c.get("type") == "tool_result" for c in first_content
+    ):
+        trimmed = trimmed[1:]
+    return trimmed
 
 
 def ask_agent(wa_id: str, user_message: str) -> tuple[str, dict | None]:
     """Devuelve (texto_para_el_cliente, solicitud_de_cita).
     solicitud_de_cita es None salvo que Claude haya usado la herramienta
     solicitar_cita, en cuyo caso trae {"nombre", "servicio", "horario"}."""
-    history = get_history(wa_id)
+    history = _load_history(wa_id)
     history.append({"role": "user", "content": user_message})
 
     message = get_client().messages.create(
@@ -111,20 +109,20 @@ def ask_agent(wa_id: str, user_message: str) -> tuple[str, dict | None]:
         tools=[BOOKING_TOOL],
         messages=history,
     )
-    history.append({"role": "assistant", "content": message.content})
+    # .model_dump() convierte los bloques del SDK a dicts planos, para poder
+    # guardarlos como JSON en Redis (los objetos del SDK no son serializables).
+    content = [block.model_dump() for block in message.content]
+    history.append({"role": "assistant", "content": content})
 
-    text = "".join(
-        block.text for block in message.content if getattr(block, "type", None) == "text"
-    ).strip()
+    text = "".join(b["text"] for b in content if b.get("type") == "text").strip()
 
     booking_request = None
     tool_use_block = next(
-        (b for b in message.content if getattr(b, "type", None) == "tool_use"
-         and b.name == "solicitar_cita"),
+        (b for b in content if b.get("type") == "tool_use" and b.get("name") == "solicitar_cita"),
         None,
     )
     if tool_use_block:
-        booking_request = dict(tool_use_block.input)
+        booking_request = dict(tool_use_block["input"])
         # La API exige un tool_result antes del siguiente turno; lo simulamos
         # aquí mismo, sin otra llamada, porque la confirmación real depende
         # de que el negocio apruebe el horario (eso lo maneja main.py).
@@ -132,7 +130,7 @@ def ask_agent(wa_id: str, user_message: str) -> tuple[str, dict | None]:
             "role": "user",
             "content": [{
                 "type": "tool_result",
-                "tool_use_id": tool_use_block.id,
+                "tool_use_id": tool_use_block["id"],
                 "content": "Solicitud registrada. Se está confirmando disponibilidad con el negocio.",
             }],
         })
@@ -144,5 +142,5 @@ def ask_agent(wa_id: str, user_message: str) -> tuple[str, dict | None]:
     else:
         reply = text
 
-    _trim_history(wa_id)
+    _save_history(wa_id, _trim(history))
     return reply, booking_request
