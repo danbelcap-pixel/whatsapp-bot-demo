@@ -270,6 +270,32 @@ def get_oldest_pending_appointment() -> dict | None:
         return None
 
 
+def list_pending_appointments() -> list[dict]:
+    """Devuelve TODAS las solicitudes pendientes (no solo la más antigua) —
+    para mostrárselas completas al dueño cuando tiene que elegir cuál."""
+    sheet_id = os.getenv("GOOGLE_SHEET_ID")
+    if not sheet_id:
+        return []
+    try:
+        service = _get_service()
+        if not service:
+            return []
+        tab = _citas_tab_name()
+        _ensure_tab_exists(service, sheet_id, tab, CITAS_HEADERS)
+        result = service.spreadsheets().values().get(
+            spreadsheetId=sheet_id, range=f"'{tab}'!A2:G"
+        ).execute()
+        rows = result.get("values", [])
+        return [
+            _row_to_appointment(row, i)
+            for i, row in enumerate(rows, start=2)
+            if len(row) >= 7 and row[6] == "pendiente"
+        ]
+    except Exception:
+        log.exception("No se pudo listar las citas pendientes de Google Sheets")
+        return []
+
+
 def count_pending_appointments() -> int:
     sheet_id = os.getenv("GOOGLE_SHEET_ID")
     if not sheet_id:

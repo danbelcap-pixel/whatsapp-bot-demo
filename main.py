@@ -11,8 +11,8 @@ from agent.client import ask_agent
 from services.sheets import (
     add_pending_appointment,
     count_pending_appointments,
-    get_oldest_pending_appointment,
     get_pending_appointment_by_folio,
+    list_pending_appointments,
     log_event,
     mark_appointment_resolved,
 )
@@ -126,25 +126,45 @@ def notify_owner_new_request(req: dict, folio: int | None, pending_count: int) -
 
 def handle_owner_reply(text: str) -> None:
     owner = os.getenv("OWNER_PHONE_NUMBER")
+    text = text.strip()
 
-    folio_match = re.search(r"\d+", text)
+    # Formato estricto y explícito para referenciar un folio: '#3 SI'.
+    # A propósito NO se busca cualquier número suelto en el texto — una
+    # respuesta como "a las 17:00" contiene un número que NO es un folio,
+    # y confundirlo con uno resolvería la cita equivocada. Cero margen para
+    # eso: o el folio viene marcado sin ambigüedad, o no se adivina nada.
+    folio_match = re.match(r"^#(\d+)\s+(.*)$", text)
+
     if folio_match:
-        req = get_pending_appointment_by_folio(int(folio_match.group()))
-        # Quita el número para quedarnos solo con la palabra de respuesta
-        text_sin_folio = re.sub(r"\d+", "", text).strip()
+        req = get_pending_appointment_by_folio(int(folio_match.group(1)))
+        reply_text = folio_match.group(2).strip()
+        if not req:
+            send_whatsapp_message(
+                owner,
+                f"No encontré una solicitud pendiente con el folio #{folio_match.group(1)}. "
+                f"Revisa el número e intenta de nuevo.",
+            )
+            return
     else:
-        req = get_oldest_pending_appointment()
-        text_sin_folio = text
+        pending = list_pending_appointments()
+        if len(pending) == 0:
+            send_whatsapp_message(owner, "No tengo ninguna solicitud de cita pendiente ahora mismo.")
+            return
+        if len(pending) > 1:
+            # Varias pendientes y no especificó folio — no se adivina, se pregunta.
+            lista = "\n".join(
+                f"#{p['folio']} — {p['nombre']} ({p['servicio']}, {p['horario']})" for p in pending
+            )
+            send_whatsapp_message(
+                owner,
+                f"Tienes {len(pending)} solicitudes de cita pendientes — dime a cuál te "
+                f"refieres empezando tu respuesta con su folio, ej. '#{pending[0]['folio']} SI':\n\n{lista}",
+            )
+            return
+        req = pending[0]
+        reply_text = text
 
-    if not req:
-        send_whatsapp_message(
-            owner,
-            "No encontré esa solicitud de cita pendiente (o ya no hay ninguna). "
-            "Si tienes varias a la vez, incluye el folio, ej. '3 SI'.",
-        )
-        return
-
-    reply_normalized = text_sin_folio.strip().lower()
+    reply_normalized = reply_text.strip().lower()
 
     if reply_normalized in ("si", "sí", "yes", "ok", "dale"):
         send_whatsapp_message(
@@ -167,9 +187,9 @@ def handle_owner_reply(text: str) -> None:
         send_whatsapp_message(
             req["customer_wa_id"],
             f"Tu horario solicitado no estaba disponible, pero te "
-            f"proponemos: {text_sin_folio}. ¿Te funciona?",
+            f"proponemos: {reply_text}. ¿Te funciona?",
         )
-        mark_appointment_resolved(req["row_number"], f"horario_alternativo: {text_sin_folio[:100]}")
+        mark_appointment_resolved(req["row_number"], f"horario_alternativo: {reply_text[:100]}")
 
 
 @app.get("/webhook")
