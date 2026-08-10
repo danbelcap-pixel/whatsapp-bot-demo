@@ -232,6 +232,8 @@ def receive_message():
         handle_owner_reply(incoming.get("text", {}).get("body", ""))
         return "OK", 200
 
+    stored_content = None  # si se define, es lo que se guarda en el historial en vez de user_content
+
     if msg_type == "text":
         user_content = incoming.get("text", {}).get("body", "")
 
@@ -253,6 +255,10 @@ def receive_message():
             },
             {"type": "text", "text": caption or "(el cliente mandó esta foto sin descripción)"},
         ]
+        # No guardamos la foto completa en el historial — si se queda ahí,
+        # se reenvía entera en cada turno futuro de la conversación, e infla
+        # memoria y costo de API cada vez más mientras dure el chat.
+        stored_content = f"[Foto adjunta{f': {caption}' if caption else ' (sin descripción)'}]"
 
     else:
         send_whatsapp_message(
@@ -262,7 +268,7 @@ def receive_message():
         log_event("mensaje_no_soportado")
         return "OK", 200
 
-    reply, booking_request = ask_agent(wa_id, user_content)
+    reply, booking_request = ask_agent(wa_id, user_content, stored_message=stored_content)
     send_whatsapp_message(wa_id, reply)
     log_event("mensaje_respondido")
 

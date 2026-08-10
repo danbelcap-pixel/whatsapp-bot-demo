@@ -89,11 +89,21 @@ def _trim(history: list[dict]) -> list[dict]:
     return trimmed
 
 
-def ask_agent(wa_id: str, user_message: str | list[dict]) -> tuple[str, dict | None]:
+def ask_agent(
+    wa_id: str,
+    user_message: str | list[dict],
+    stored_message: str | list[dict] | None = None,
+) -> tuple[str, dict | None]:
     """Devuelve (texto_para_el_cliente, solicitud_de_cita).
     solicitud_de_cita es None salvo que Claude haya usado la herramienta
-    solicitar_cita, en cuyo caso trae {"nombre", "servicio", "horario"}."""
+    solicitar_cita, en cuyo caso trae {"nombre", "servicio", "horario"}.
+
+    stored_message: si se da, esto es lo que se GUARDA en el historial en
+    vez de user_message — para no arrastrar contenido pesado (fotos en
+    base64) en cada turno futuro de la conversación, que infla memoria y
+    costo de API cada vez que se reenvía el historial completo."""
     history = _load_history(wa_id)
+    user_index = len(history)
     history.append({"role": "user", "content": user_message})
 
     message = get_client().messages.create(
@@ -141,6 +151,9 @@ def ask_agent(wa_id: str, user_message: str | list[dict]) -> tuple[str, dict | N
         )
     else:
         reply = text
+
+    if stored_message is not None:
+        history[user_index] = {"role": "user", "content": stored_message}
 
     _save_history(wa_id, _trim(history))
     return reply, booking_request
