@@ -11,10 +11,12 @@ from agent.client import ask_agent
 from services.sheets import (
     add_pending_appointment,
     count_pending_appointments,
+    get_appointment_by_folio,
     get_pending_appointment_by_folio,
     list_pending_appointments,
     log_event,
     mark_appointment_resolved,
+    update_appointment_horario,
 )
 
 load_dotenv()
@@ -120,6 +122,44 @@ def notify_owner_new_request(req: dict, folio: int | None, pending_count: int) -
         f"Nombre: {req['nombre']}\n"
         f"Servicio: {req['servicio']}\n"
         f"Horario pedido: {req['horario']}\n\n"
+        f"{instrucciones}",
+    )
+
+
+def notify_owner_cancellation(cita: dict) -> None:
+    owner = os.getenv("OWNER_PHONE_NUMBER")
+    if not owner:
+        return
+    send_whatsapp_message(
+        owner,
+        f"❌ Folio #{cita['folio']} cancelada por el cliente\n"
+        f"Nombre: {cita['nombre']}\n"
+        f"Servicio: {cita['servicio']}\n"
+        f"Horario: {cita['horario']}",
+    )
+
+
+def notify_owner_modification(cita: dict, nuevo_horario: str, pending_count: int) -> None:
+    owner = os.getenv("OWNER_PHONE_NUMBER")
+    if not owner:
+        alert_daniel(
+            f"Se pidió mover el folio #{cita['folio']} pero OWNER_PHONE_NUMBER "
+            f"no está configurado."
+        )
+        return
+
+    folio_txt = f"#{cita['folio']}"
+    instrucciones = f"Contesta *{folio_txt} SI* para confirmar, *{folio_txt} NO* para rechazar, u otro horario."
+    if pending_count <= 1:
+        instrucciones = "Contesta *SI* para confirmar, *NO* para rechazar, u otro horario."
+
+    send_whatsapp_message(
+        owner,
+        f"🔄 Folio {folio_txt} — cambio de horario solicitado\n"
+        f"Nombre: {cita['nombre']}\n"
+        f"Servicio: {cita['servicio']}\n"
+        f"Horario anterior: {cita['horario']}\n"
+        f"Horario nuevo pedido: {nuevo_horario}\n\n"
         f"{instrucciones}",
     )
 
@@ -268,7 +308,7 @@ def receive_message():
         log_event("mensaje_no_soportado")
         return "OK", 200
 
-    reply, booking_request, hallucination_detected = ask_agent(
+    reply, action, hallucination_detected = ask_agent(
         wa_id, user_content, stored_message=stored_content
     )
     send_whatsapp_message(wa_id, reply)
@@ -276,18 +316,39 @@ def receive_message():
 
     if hallucination_detected:
         alert_daniel(
-            f"El bot casi le confirma una cita falsa a {wa_id} sin usar la "
-            f"herramienta real — se bloqueó automáticamente, pero revisa el "
-            f"prompt, esto no debería pasar."
+            f"El bot casi confirma una acción falsa de cita a {wa_id} sin "
+            f"usar la herramienta real — se bloqueó automáticamente, pero "
+            f"revisa el prompt, esto no debería pasar."
         )
         log_event("alucinacion_detectada")
 
-    if booking_request:
-        folio = add_pending_appointment(wa_id, booking_request)
-        booking_request["customer_wa_id"] = wa_id
+    if action and action["type"] == "crear":
+        folio = add_pending_appointment(wa_id, action)
+        action["customer_wa_id"] = wa_id
         pending_count = count_pending_appointments()
-        notify_owner_new_request(booking_request, folio, pending_count)
+        notify_owner_new_request(action, folio, pending_count)
         log_event("cita_solicitada")
+
+    elif action and action["type"] in ("cancelar", "modificar"):
+        # Verificación de seguridad: el folio debe pertenecer a QUIEN
+        # escribió, sin importar lo que haya dicho Claude — nunca se confía
+        # ciegamente en que el modelo eligió el folio correcto.
+        cita = get_appointment_by_folio(action["folio"])
+        if not cita or cita["customer_wa_id"] != wa_id:
+            alert_daniel(
+                f"{wa_id} intentó {action['type']} el folio #{action['folio']}, "
+                f"que no existe o no le pertenece — bloqueado."
+            )
+        elif action["type"] == "cancelar":
+            mark_appointment_resolved(cita["row_number"], "cancelada_por_cliente")
+            notify_owner_cancellation(cita)
+            log_event("cita_cancelada")
+        else:  # modificar
+            update_appointment_horario(cita["row_number"], action["nuevo_horario"])
+            mark_appointment_resolved(cita["row_number"], "pendiente")  # requiere reconfirmar
+            pending_count = count_pending_appointments()
+            notify_owner_modification(cita, action["nuevo_horario"], pending_count)
+            log_event("cita_modificada")
 
     return "OK", 200
 

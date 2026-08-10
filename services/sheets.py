@@ -16,7 +16,7 @@ _known_tabs: set[str] = set()
 SUMMARY_HEADERS = [
     "Fecha", "Mensajes", "Citas solicitadas", "Citas confirmadas",
     "Citas rechazadas", "Errores", "No soportados (audio/sticker/etc)",
-    "Alucinaciones bloqueadas",
+    "Alucinaciones bloqueadas", "Citas canceladas", "Citas modificadas",
 ]
 EVENT_COLUMN = {
     "mensaje_respondido": 1,
@@ -24,8 +24,10 @@ EVENT_COLUMN = {
     "cita_confirmada": 3,
     "cita_rechazada": 4,
     "error_envio": 5,
-    "alucinacion_detectada": 7,
     "mensaje_no_soportado": 6,
+    "alucinacion_detectada": 7,
+    "cita_cancelada": 8,
+    "cita_modificada": 9,
 }
 
 CITAS_HEADERS = ["Folio", "Fecha", "customer_wa_id", "nombre", "servicio", "horario", "estado"]
@@ -214,6 +216,7 @@ def _row_to_appointment(row: list, row_number: int) -> dict:
         "nombre": row[3],
         "servicio": row[4],
         "horario": row[5],
+        "estado": row[6] if len(row) > 6 else "",
     }
 
 
@@ -316,6 +319,82 @@ def count_pending_appointments() -> int:
     except Exception:
         log.exception("No se pudo contar las citas pendientes en Google Sheets")
         return 0
+
+
+_INACTIVE_STATES = ("rechazada", "cancelada_por_cliente")
+
+
+def get_customer_active_appointments(wa_id: str) -> list[dict]:
+    """Citas activas (ni rechazadas ni canceladas) de un cliente específico —
+    para que el bot sepa qué citas ya tiene antes de crear, cancelar o
+    modificar, en vez de adivinar o confundir una cita nueva con una vieja."""
+    sheet_id = os.getenv("GOOGLE_SHEET_ID")
+    if not sheet_id:
+        return []
+    try:
+        service = _get_service()
+        if not service:
+            return []
+        tab = _citas_tab_name()
+        _ensure_tab_exists(service, sheet_id, tab, CITAS_HEADERS)
+        result = service.spreadsheets().values().get(
+            spreadsheetId=sheet_id, range=f"'{tab}'!A2:G"
+        ).execute()
+        rows = result.get("values", [])
+        return [
+            _row_to_appointment(row, i)
+            for i, row in enumerate(rows, start=2)
+            if len(row) >= 7 and row[2] == wa_id and row[6] not in _INACTIVE_STATES
+        ]
+    except Exception:
+        log.exception("No se pudo leer las citas activas del cliente en Google Sheets")
+        return []
+
+
+def get_appointment_by_folio(folio: int) -> dict | None:
+    """Busca una cita por folio sin importar su estado (a diferencia de
+    get_pending_appointment_by_folio, que solo busca 'pendiente') — para
+    validar cancelaciones/modificaciones contra el estado real."""
+    sheet_id = os.getenv("GOOGLE_SHEET_ID")
+    if not sheet_id:
+        return None
+    try:
+        service = _get_service()
+        if not service:
+            return None
+        tab = _citas_tab_name()
+        _ensure_tab_exists(service, sheet_id, tab, CITAS_HEADERS)
+        result = service.spreadsheets().values().get(
+            spreadsheetId=sheet_id, range=f"'{tab}'!A2:G"
+        ).execute()
+        rows = result.get("values", [])
+        for i, row in enumerate(rows, start=2):
+            if len(row) >= 7 and str(row[0]) == str(folio):
+                return _row_to_appointment(row, i)
+        return None
+    except Exception:
+        log.exception("No se pudo buscar la cita por folio en Google Sheets")
+        return None
+
+
+def update_appointment_horario(row_number: int, nuevo_horario: str) -> None:
+    """Actualiza solo la columna 'horario' de una fila específica."""
+    sheet_id = os.getenv("GOOGLE_SHEET_ID")
+    if not sheet_id:
+        return
+    try:
+        service = _get_service()
+        if not service:
+            return
+        tab = _citas_tab_name()
+        service.spreadsheets().values().update(
+            spreadsheetId=sheet_id,
+            range=f"'{tab}'!F{row_number}",
+            valueInputOption="RAW",
+            body={"values": [[nuevo_horario]]},
+        ).execute()
+    except Exception:
+        log.exception("No se pudo actualizar el horario de la cita en Google Sheets")
 
 
 def mark_appointment_resolved(row_number: int, estado: str) -> None:
