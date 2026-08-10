@@ -13,13 +13,17 @@ _known_tabs: set[str] = set()
 
 # Reporte: 1 fila POR DÍA con contadores (no 1 fila por mensaje — con muchos
 # negocios y mucho tráfico, una fila por evento haría la hoja inmanejable).
-SUMMARY_HEADERS = ["Fecha", "Mensajes", "Citas solicitadas", "Citas confirmadas", "Citas rechazadas", "Errores"]
+SUMMARY_HEADERS = [
+    "Fecha", "Mensajes", "Citas solicitadas", "Citas confirmadas",
+    "Citas rechazadas", "Errores", "No soportados (audio/sticker/etc)",
+]
 EVENT_COLUMN = {
     "mensaje_respondido": 1,
     "cita_solicitada": 2,
     "cita_confirmada": 3,
     "cita_rechazada": 4,
     "error_envio": 5,
+    "mensaje_no_soportado": 6,
 }
 
 CITAS_HEADERS = ["Folio", "Fecha", "customer_wa_id", "nombre", "servicio", "horario", "estado"]
@@ -151,7 +155,7 @@ def log_event(evento: str) -> None:
                 body={"values": [[int(current_value or 0) + 1]]},
             ).execute()
         else:
-            row = [today, 0, 0, 0, 0, 0]
+            row = [today] + [0] * (len(SUMMARY_HEADERS) - 1)
             row[col_index] = 1
             service.spreadsheets().values().append(
                 spreadsheetId=sheet_id,

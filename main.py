@@ -1,3 +1,4 @@
+import base64
 import logging
 import os
 import re
@@ -35,6 +36,28 @@ def normalize_mx_number(wa_id: str) -> str:
     if wa_id.startswith("521") and len(wa_id) == 13:
         return "52" + wa_id[3:]
     return wa_id
+
+
+def fetch_whatsapp_media(media_id: str) -> tuple[bytes, str] | None:
+    """Descarga un archivo multimedia de WhatsApp (foto, audio, etc.).
+    Devuelve (bytes_del_archivo, mime_type) o None si algo falla."""
+    token = os.getenv("WHATSAPP_TOKEN")
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        meta_resp = requests.get(
+            f"https://graph.facebook.com/{GRAPH_API_VERSION}/{media_id}",
+            headers=headers,
+            timeout=15,
+        )
+        meta_resp.raise_for_status()
+        meta = meta_resp.json()
+
+        file_resp = requests.get(meta["url"], headers=headers, timeout=20)
+        file_resp.raise_for_status()
+        return file_resp.content, meta.get("mime_type", "image/jpeg")
+    except requests.RequestException:
+        log.exception("No se pudo descargar el archivo multimedia %s", media_id)
+        return None
 
 
 def send_whatsapp_message(to: str, body: str) -> None:
@@ -177,19 +200,49 @@ def receive_message():
 
         incoming = messages[0]
         wa_id = normalize_mx_number(incoming["from"])
-        text = incoming.get("text", {}).get("body", "")
+        msg_type = incoming.get("type", "text")
     except (KeyError, IndexError):
         log.warning("Payload de webhook con formato inesperado: %s", payload)
         return "OK", 200
 
-    log.info("Mensaje de %s: %s", wa_id, text)
+    log.info("Mensaje de %s (tipo: %s)", wa_id, msg_type)
 
     owner = os.getenv("OWNER_PHONE_NUMBER")
     if owner and wa_id == owner:
-        handle_owner_reply(text)
+        handle_owner_reply(incoming.get("text", {}).get("body", ""))
         return "OK", 200
 
-    reply, booking_request = ask_agent(wa_id, text)
+    if msg_type == "text":
+        user_content = incoming.get("text", {}).get("body", "")
+
+    elif msg_type == "image":
+        media = fetch_whatsapp_media(incoming["image"]["id"])
+        if not media:
+            send_whatsapp_message(wa_id, "No pude abrir tu foto, ¿me la puedes describir por texto?")
+            return "OK", 200
+        image_bytes, mime_type = media
+        caption = incoming["image"].get("caption", "")
+        user_content = [
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": mime_type,
+                    "data": base64.b64encode(image_bytes).decode(),
+                },
+            },
+            {"type": "text", "text": caption or "(el cliente mandó esta foto sin descripción)"},
+        ]
+
+    else:
+        send_whatsapp_message(
+            wa_id,
+            "Por ahora solo puedo leer mensajes de texto o fotos — ¿me lo escribes? 🙏",
+        )
+        log_event("mensaje_no_soportado")
+        return "OK", 200
+
+    reply, booking_request = ask_agent(wa_id, user_content)
     send_whatsapp_message(wa_id, reply)
     log_event("mensaje_respondido")
 

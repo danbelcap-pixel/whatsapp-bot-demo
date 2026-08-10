@@ -89,7 +89,7 @@ def _trim(history: list[dict]) -> list[dict]:
     return trimmed
 
 
-def ask_agent(wa_id: str, user_message: str) -> tuple[str, dict | None]:
+def ask_agent(wa_id: str, user_message: str | list[dict]) -> tuple[str, dict | None]:
     """Devuelve (texto_para_el_cliente, solicitud_de_cita).
     solicitud_de_cita es None salvo que Claude haya usado la herramienta
     solicitar_cita, en cuyo caso trae {"nombre", "servicio", "horario"}."""
