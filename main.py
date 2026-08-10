@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 
 import requests
 from dotenv import load_dotenv
@@ -8,7 +9,9 @@ from flask import Flask, request
 from agent.client import ask_agent
 from services.sheets import (
     add_pending_appointment,
+    count_pending_appointments,
     get_oldest_pending_appointment,
+    get_pending_appointment_by_folio,
     log_event,
     mark_appointment_resolved,
 )
@@ -53,7 +56,7 @@ def send_whatsapp_message(to: str, body: str) -> None:
     if resp.status_code >= 400:
         log.error("Error enviando mensaje a WhatsApp: %s %s", resp.status_code, resp.text)
         alert_daniel(f"Fallo al enviar mensaje a {to}: HTTP {resp.status_code} — {resp.text[:200]}")
-        log_event("error_envio", f"HTTP {resp.status_code} a {to}")
+        log_event("error_envio")
 
 
 def alert_daniel(message: str) -> None:
@@ -74,32 +77,51 @@ def alert_daniel(message: str) -> None:
         log.exception("No se pudo mandar la alerta por Telegram")
 
 
-def notify_owner_new_request(req: dict) -> None:
+def notify_owner_new_request(req: dict, folio: int | None, pending_count: int) -> None:
     owner = os.getenv("OWNER_PHONE_NUMBER")
     if not owner:
         alert_daniel(
             f"Se pidió una cita pero OWNER_PHONE_NUMBER no está configurado: {req}"
         )
         return
+
+    folio_txt = f"#{folio}" if folio else "#?"
+    instrucciones = f"Contesta *{folio_txt} SI* para confirmar, *{folio_txt} NO* para rechazar, u otro horario."
+    if pending_count <= 1:
+        # Es la única pendiente — no hace falta que escriba el folio
+        instrucciones = "Contesta *SI* para confirmar, *NO* para rechazar, u otro horario."
+
     send_whatsapp_message(
         owner,
-        f"📅 Nueva solicitud de cita\n"
+        f"📅 Solicitud de cita {folio_txt}\n"
         f"Nombre: {req['nombre']}\n"
         f"Servicio: {req['servicio']}\n"
         f"Horario pedido: {req['horario']}\n\n"
-        f"Contesta *SI* para confirmar, *NO* para rechazar, u otro horario "
-        f"para proponer un cambio.",
+        f"{instrucciones}",
     )
 
 
 def handle_owner_reply(text: str) -> None:
     owner = os.getenv("OWNER_PHONE_NUMBER")
-    req = get_oldest_pending_appointment()
+
+    folio_match = re.search(r"\d+", text)
+    if folio_match:
+        req = get_pending_appointment_by_folio(int(folio_match.group()))
+        # Quita el número para quedarnos solo con la palabra de respuesta
+        text_sin_folio = re.sub(r"\d+", "", text).strip()
+    else:
+        req = get_oldest_pending_appointment()
+        text_sin_folio = text
+
     if not req:
-        send_whatsapp_message(owner, "No tengo ninguna solicitud de cita pendiente ahora mismo.")
+        send_whatsapp_message(
+            owner,
+            "No encontré esa solicitud de cita pendiente (o ya no hay ninguna). "
+            "Si tienes varias a la vez, incluye el folio, ej. '3 SI'.",
+        )
         return
 
-    reply_normalized = text.strip().lower()
+    reply_normalized = text_sin_folio.strip().lower()
 
     if reply_normalized in ("si", "sí", "yes", "ok", "dale"):
         send_whatsapp_message(
@@ -108,7 +130,7 @@ def handle_owner_reply(text: str) -> None:
             f"el {req['horario']}. Te esperamos 🙌",
         )
         mark_appointment_resolved(req["row_number"], "confirmada")
-        log_event("cita_confirmada", f"{req['nombre']} - {req['servicio']} - {req['horario']}")
+        log_event("cita_confirmada")
     elif reply_normalized == "no":
         send_whatsapp_message(
             req["customer_wa_id"],
@@ -116,16 +138,15 @@ def handle_owner_reply(text: str) -> None:
             "funcione? Escríbenos de nuevo para revisar otra opción.",
         )
         mark_appointment_resolved(req["row_number"], "rechazada")
-        log_event("cita_rechazada", f"{req['nombre']} - {req['servicio']} - {req['horario']}")
+        log_event("cita_rechazada")
     else:
         # El dueño escribió un horario alternativo en texto libre
         send_whatsapp_message(
             req["customer_wa_id"],
             f"Tu horario solicitado no estaba disponible, pero te "
-            f"proponemos: {text}. ¿Te funciona?",
+            f"proponemos: {text_sin_folio}. ¿Te funciona?",
         )
-        mark_appointment_resolved(req["row_number"], f"horario_alternativo: {text[:100]}")
-        log_event("cita_horario_alternativo", f"{req['nombre']} - propuesta: {text}")
+        mark_appointment_resolved(req["row_number"], f"horario_alternativo: {text_sin_folio[:100]}")
 
 
 @app.get("/webhook")
@@ -170,16 +191,14 @@ def receive_message():
 
     reply, booking_request = ask_agent(wa_id, text)
     send_whatsapp_message(wa_id, reply)
-    log_event("mensaje_respondido", text[:200])
+    log_event("mensaje_respondido")
 
     if booking_request:
-        add_pending_appointment(wa_id, booking_request)
+        folio = add_pending_appointment(wa_id, booking_request)
         booking_request["customer_wa_id"] = wa_id
-        notify_owner_new_request(booking_request)
-        log_event(
-            "cita_solicitada",
-            f"{booking_request['nombre']} - {booking_request['servicio']} - {booking_request['horario']}",
-        )
+        pending_count = count_pending_appointments()
+        notify_owner_new_request(booking_request, folio, pending_count)
+        log_event("cita_solicitada")
 
     return "OK", 200
 
