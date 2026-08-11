@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from flask import Flask, request
 
 from agent.client import ask_agent
+from services.memory import is_duplicate_message
 from services.sheets import (
     add_pending_appointment,
     count_pending_appointments,
@@ -261,8 +262,13 @@ def receive_message():
         incoming = messages[0]
         wa_id = normalize_mx_number(incoming["from"])
         msg_type = incoming.get("type", "text")
+        message_id = incoming.get("id", "")
     except (KeyError, IndexError):
         log.warning("Payload de webhook con formato inesperado: %s", payload)
+        return "OK", 200
+
+    if is_duplicate_message(message_id):
+        log.info("Mensaje %s duplicado (reintento de Meta), ignorado.", message_id)
         return "OK", 200
 
     log.info("Mensaje de %s (tipo: %s)", wa_id, msg_type)

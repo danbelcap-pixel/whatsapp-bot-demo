@@ -50,3 +50,27 @@ def save_history(wa_id: str, history: list[dict]) -> None:
         resp.raise_for_status()
     except Exception:
         log.exception("No se pudo guardar el historial de conversación en Upstash")
+
+
+def is_duplicate_message(message_id: str) -> bool:
+    """Marca este message_id de WhatsApp como procesado y devuelve True si
+    YA se había procesado antes (webhook reenviado por Meta). Usa SET...NX
+    de Redis, que es atómico: si dos reintentos llegan casi al mismo tiempo,
+    solo uno de los dos puede "ganar" el NX. Sin Upstash configurado, no se
+    puede deduplicar y se deja pasar (mejor procesar de más que quedarse
+    mudo)."""
+    url = _base_url()
+    if not url or not message_id:
+        return False
+    try:
+        resp = requests.post(
+            f"{url}/set/procesado:{message_id}/1/EX/600/NX",
+            headers=_headers(),
+            timeout=10,
+        )
+        resp.raise_for_status()
+        # NX devuelve "OK" si SÍ se guardó (primera vez); null si ya existía.
+        return resp.json().get("result") != "OK"
+    except Exception:
+        log.exception("No se pudo verificar duplicados de mensaje en Upstash")
+        return False
