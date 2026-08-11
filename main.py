@@ -7,8 +7,8 @@ import requests
 from dotenv import load_dotenv
 from flask import Flask, request
 
-from agent.client import ask_agent
-from services.memory import is_duplicate_message
+from agent.client import ask_agent, interpret_owner_instruction
+from services.memory import is_duplicate_message, save_business_notice
 from services.sheets import (
     add_pending_appointment,
     count_pending_appointments,
@@ -189,7 +189,22 @@ def handle_owner_reply(text: str) -> None:
     else:
         pending = list_pending_appointments()
         if len(pending) == 0:
-            send_whatsapp_message(owner, "No tengo ninguna solicitud de cita pendiente ahora mismo.")
+            # Nada pendiente: podría ser un aviso de cierre/horario especial
+            # en vez de una respuesta de cita — se interpreta con Claude en
+            # vez de asumir que no tiene sentido.
+            aviso = interpret_owner_instruction(text)
+            if aviso:
+                save_business_notice(aviso)
+                send_whatsapp_message(owner, f'Anotado — les voy a avisar a los clientes: "{aviso}"')
+                log_event("aviso_negocio_actualizado")
+            else:
+                send_whatsapp_message(
+                    owner,
+                    "No tengo ninguna solicitud de cita pendiente ahora mismo. "
+                    "Si quieres avisar de un cierre especial o cambio de "
+                    "horario, dime algo como 'mañana cerraremos' o 'el "
+                    "jueves cerramos a las 2pm'.",
+                )
             return
         if len(pending) > 1:
             # Varias pendientes y no especificó folio — no se adivina, se pregunta.

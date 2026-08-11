@@ -17,6 +17,7 @@ SUMMARY_HEADERS = [
     "Fecha", "Mensajes", "Citas solicitadas", "Citas confirmadas",
     "Citas rechazadas", "Errores", "No soportados (audio/sticker/etc)",
     "Alucinaciones bloqueadas", "Citas canceladas", "Citas modificadas",
+    "Avisos de negocio actualizados",
 ]
 EVENT_COLUMN = {
     "mensaje_respondido": 1,
@@ -27,6 +28,7 @@ EVENT_COLUMN = {
     "mensaje_no_soportado": 6,
     "alucinacion_detectada": 7,
     "cita_cancelada": 8,
+    "aviso_negocio_actualizado": 10,
     "cita_modificada": 9,
 }
 

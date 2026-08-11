@@ -1,6 +1,7 @@
 import os
 from anthropic import Anthropic
 
+from services.memory import get_business_notice
 from services.memory import get_history as _load_history
 from services.memory import save_history as _save_history
 from services.sheets import get_customer_active_appointments
@@ -99,8 +100,55 @@ RESCHEDULE_TOOL = {
 
 ALL_TOOLS = [BOOKING_TOOL, CANCEL_TOOL, RESCHEDULE_TOOL]
 
+ANNOUNCEMENT_TOOL = {
+    "name": "actualizar_aviso_negocio",
+    "description": (
+        "Guarda un aviso temporal para mostrarles a los clientes (cierre "
+        "especial, cambio de horario, etc.). Úsala cuando el dueño del "
+        "negocio te informe de algo así en su propio mensaje."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "aviso": {
+                "type": "string",
+                "description": "El aviso redactado claro, tal cual se le debe decir a un cliente que pregunte",
+            },
+        },
+        "required": ["aviso"],
+    },
+}
 
-def _system_prompt(citas_activas: list[dict]) -> str:
+
+def interpret_owner_instruction(text: str) -> str | None:
+    """Le pregunta a Claude si este mensaje del DUEÑO es un aviso de cierre
+    especial / cambio de horario. Devuelve el aviso redactado a guardar, o
+    None si el mensaje no es eso."""
+    negocio = os.getenv("BUSINESS_NAME", "este negocio")
+    message = get_client().messages.create(
+        model=MODEL,
+        max_tokens=300,
+        system=[{
+            "type": "text",
+            "text": (
+                f"Eres el asistente interno de {negocio}. Este mensaje viene "
+                f"del DUEÑO del negocio (no de un cliente). Si te está "
+                f"avisando de un cierre especial, cambio de horario "
+                f"temporal, o algo que los clientes deberían saber antes de "
+                f"preguntar, usa la herramienta actualizar_aviso_negocio con "
+                f"el aviso redactado claro y breve. Si el mensaje no es eso, "
+                f"no uses ninguna herramienta."
+            ),
+        }],
+        tools=[ANNOUNCEMENT_TOOL],
+        messages=[{"role": "user", "content": text}],
+    )
+    content = [block.model_dump() for block in message.content]
+    tool_block = next((b for b in content if b.get("type") == "tool_use"), None)
+    return tool_block["input"]["aviso"] if tool_block else None
+
+
+def _system_prompt(citas_activas: list[dict], aviso_negocio: str | None) -> str:
     negocio = os.getenv("BUSINESS_NAME", "este negocio")
 
     if citas_activas:
@@ -112,6 +160,12 @@ def _system_prompt(citas_activas: list[dict]) -> str:
     else:
         citas_texto = "Este cliente no tiene ninguna cita activa registrada todavía."
 
+    aviso_texto = (
+        f"\nAVISO ESPECIAL VIGENTE — menciónalo si el cliente pregunta por "
+        f"horarios, o de entrada si aplica a lo que está pidiendo:\n{aviso_negocio}\n"
+        if aviso_negocio else ""
+    )
+
     return f"""\
 Eres el asistente de atención al cliente por WhatsApp de {negocio}.
 
@@ -119,7 +173,7 @@ Responde dudas de clientes de forma breve, cálida y directa, como lo haría
 un empleado que conoce bien el negocio. Nunca inventes precios, horarios o
 datos que no tengas — si no sabes algo, dilo y ofrece tomar el dato de
 contacto para que alguien del negocio confirme.
-
+{aviso_texto}
 {citas_texto}
 
 LO QUE SÍ PUEDES HACER (lo único real):
@@ -174,7 +228,10 @@ def _trim(history: list[dict]) -> list[dict]:
 
 
 def _call_claude(
-    history: list[dict], citas_activas: list[dict], force_any_tool: bool = False
+    history: list[dict],
+    citas_activas: list[dict],
+    aviso_negocio: str | None,
+    force_any_tool: bool = False,
 ) -> tuple[list[dict], str, dict | None]:
     """Llama a Claude y devuelve (content_serializable, texto, tool_use_block)."""
     message = get_client().messages.create(
@@ -183,7 +240,7 @@ def _call_claude(
         system=[
             {
                 "type": "text",
-                "text": _system_prompt(citas_activas),
+                "text": _system_prompt(citas_activas, aviso_negocio),
                 "cache_control": {"type": "ephemeral"},
             }
         ],
@@ -225,12 +282,13 @@ def ask_agent(
     base64) en cada turno futuro de la conversación, que infla memoria y
     costo de API cada vez que se reenvía el historial completo."""
     citas_activas = get_customer_active_appointments(wa_id)
+    aviso_negocio = get_business_notice()
 
     history = _load_history(wa_id)
     user_index = len(history)
     history.append({"role": "user", "content": user_message})
 
-    content, text, tool_block = _call_claude(history, citas_activas)
+    content, text, tool_block = _call_claude(history, citas_activas, aviso_negocio)
     history.append({"role": "assistant", "content": content})
 
     hallucination_detected = False
@@ -240,7 +298,7 @@ def ask_agent(
         # forzamos en un segundo intento antes de rendirnos.
         hallucination_detected = True
         retry_content, _, retry_tool_block = _call_claude(
-            history[:-1], citas_activas, force_any_tool=True
+            history[:-1], citas_activas, aviso_negocio, force_any_tool=True
         )
         if retry_tool_block:
             content, tool_block = retry_content, retry_tool_block
