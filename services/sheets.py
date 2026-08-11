@@ -2,13 +2,17 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
+from urllib.parse import quote
 
+import requests
+from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.oauth2 import service_account
-from googleapiclient.discovery import build
 
 log = logging.getLogger("whatsapp-bot")
 
-_service = None
+SHEETS_API = "https://sheets.googleapis.com/v4/spreadsheets"
+
+_credentials = None
 _known_tabs: set[str] = set()
 
 # Reporte: 1 fila POR DÍA con contadores (no 1 fila por mensaje — con muchos
@@ -33,87 +37,137 @@ EVENT_COLUMN = {
 }
 
 CITAS_HEADERS = ["Folio", "Fecha", "customer_wa_id", "nombre", "servicio", "horario", "estado"]
+_INACTIVE_STATES = ("rechazada", "cancelada_por_cliente")
 
 
-def _get_service():
-    global _service
-    if _service is not None:
-        return _service
+# ─── Capa de transporte: REST directo con `requests`, sin la librería ──────
+# pesada google-api-python-client (que arrastra httplib2/protobuf/google-api-
+# core y por sí sola inflaba la memoria del servidor hasta tumbarlo en el
+# plan gratis de Render). Solo se usa google-auth, mucho más ligero, para
+# firmar el token de acceso.
 
+def _get_credentials():
+    global _credentials
+    if _credentials is not None:
+        return _credentials
     creds_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
     if not creds_json:
         return None
-
     info = json.loads(creds_json)
-    credentials = service_account.Credentials.from_service_account_info(
+    _credentials = service_account.Credentials.from_service_account_info(
         info, scopes=["https://www.googleapis.com/auth/spreadsheets"]
     )
-    _service = build("sheets", "v4", credentials=credentials)
-    return _service
+    return _credentials
 
 
-def _format_tab(service, sheet_id: str, sheet_tab_id: int, num_columns: int) -> None:
+def _auth_headers() -> dict | None:
+    creds = _get_credentials()
+    if not creds:
+        return None
+    if not creds.valid:
+        creds.refresh(GoogleAuthRequest())
+    return {"Authorization": f"Bearer {creds.token}", "Content-Type": "application/json"}
+
+
+def _values_get(sheet_id: str, range_str: str) -> list[list]:
+    headers = _auth_headers()
+    if not headers:
+        return []
+    url = f"{SHEETS_API}/{sheet_id}/values/{quote(range_str, safe='')}"
+    resp = requests.get(url, headers=headers, timeout=15)
+    resp.raise_for_status()
+    return resp.json().get("values", [])
+
+
+def _values_append(
+    sheet_id: str, range_str: str, values: list[list],
+    value_input_option: str = "USER_ENTERED", insert_data_option: str = "INSERT_ROWS",
+) -> dict:
+    headers = _auth_headers()
+    if not headers:
+        return {}
+    url = f"{SHEETS_API}/{sheet_id}/values/{quote(range_str, safe='')}:append"
+    params = {"valueInputOption": value_input_option, "insertDataOption": insert_data_option}
+    resp = requests.post(url, headers=headers, params=params, json={"values": values}, timeout=15)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _values_update(sheet_id: str, range_str: str, values: list[list], value_input_option: str = "RAW") -> None:
+    headers = _auth_headers()
+    if not headers:
+        return
+    url = f"{SHEETS_API}/{sheet_id}/values/{quote(range_str, safe='')}"
+    params = {"valueInputOption": value_input_option}
+    resp = requests.put(url, headers=headers, params=params, json={"values": values}, timeout=15)
+    resp.raise_for_status()
+
+
+def _batch_update(sheet_id: str, requests_body: list[dict]) -> dict:
+    headers = _auth_headers()
+    if not headers:
+        return {}
+    url = f"{SHEETS_API}/{sheet_id}:batchUpdate"
+    resp = requests.post(url, headers=headers, json={"requests": requests_body}, timeout=15)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _get_metadata(sheet_id: str) -> dict:
+    headers = _auth_headers()
+    if not headers:
+        return {}
+    resp = requests.get(f"{SHEETS_API}/{sheet_id}", headers=headers, timeout=15)
+    resp.raise_for_status()
+    return resp.json()
+
+
+# ─── Helpers de estructura de la hoja ───────────────────────────────────────
+
+def _format_tab(sheet_id: str, sheet_tab_id: int, num_columns: int) -> None:
     """Encabezado en negritas, fila congelada, columnas ajustadas al contenido."""
-    service.spreadsheets().batchUpdate(
-        spreadsheetId=sheet_id,
-        body={
-            "requests": [
-                {
-                    "repeatCell": {
-                        "range": {"sheetId": sheet_tab_id, "startRowIndex": 0, "endRowIndex": 1},
-                        "cell": {
-                            "userEnteredFormat": {
-                                "textFormat": {"bold": True},
-                                "backgroundColor": {"red": 0.90, "green": 0.90, "blue": 0.90},
-                            }
-                        },
-                        "fields": "userEnteredFormat(textFormat,backgroundColor)",
+    _batch_update(sheet_id, [
+        {
+            "repeatCell": {
+                "range": {"sheetId": sheet_tab_id, "startRowIndex": 0, "endRowIndex": 1},
+                "cell": {
+                    "userEnteredFormat": {
+                        "textFormat": {"bold": True},
+                        "backgroundColor": {"red": 0.90, "green": 0.90, "blue": 0.90},
                     }
                 },
-                {
-                    "updateSheetProperties": {
-                        "properties": {
-                            "sheetId": sheet_tab_id,
-                            "gridProperties": {"frozenRowCount": 1},
-                        },
-                        "fields": "gridProperties.frozenRowCount",
-                    }
-                },
-                {
-                    "autoResizeDimensions": {
-                        "dimensions": {
-                            "sheetId": sheet_tab_id,
-                            "dimension": "COLUMNS",
-                            "startIndex": 0,
-                            "endIndex": num_columns,
-                        }
-                    }
-                },
-            ]
+                "fields": "userEnteredFormat(textFormat,backgroundColor)",
+            }
         },
-    ).execute()
+        {
+            "updateSheetProperties": {
+                "properties": {"sheetId": sheet_tab_id, "gridProperties": {"frozenRowCount": 1}},
+                "fields": "gridProperties.frozenRowCount",
+            }
+        },
+        {
+            "autoResizeDimensions": {
+                "dimensions": {
+                    "sheetId": sheet_tab_id, "dimension": "COLUMNS",
+                    "startIndex": 0, "endIndex": num_columns,
+                }
+            }
+        },
+    ])
 
 
-def _ensure_tab_exists(service, sheet_id: str, tab_name: str, headers: list[str]) -> None:
+def _ensure_tab_exists(sheet_id: str, tab_name: str, headers: list[str]) -> None:
     if tab_name in _known_tabs:
         return
 
-    metadata = service.spreadsheets().get(spreadsheetId=sheet_id).execute()
+    metadata = _get_metadata(sheet_id)
     existing = {s["properties"]["title"]: s["properties"]["sheetId"] for s in metadata.get("sheets", [])}
 
     if tab_name not in existing:
-        add_result = service.spreadsheets().batchUpdate(
-            spreadsheetId=sheet_id,
-            body={"requests": [{"addSheet": {"properties": {"title": tab_name}}}]},
-        ).execute()
+        add_result = _batch_update(sheet_id, [{"addSheet": {"properties": {"title": tab_name}}}])
         sheet_tab_id = add_result["replies"][0]["addSheet"]["properties"]["sheetId"]
-        service.spreadsheets().values().append(
-            spreadsheetId=sheet_id,
-            range=f"'{tab_name}'!A1",
-            valueInputOption="RAW",
-            body={"values": [headers]},
-        ).execute()
-        _format_tab(service, sheet_id, sheet_tab_id, len(headers))
+        _values_append(sheet_id, f"'{tab_name}'!A1", [headers], value_input_option="RAW")
+        _format_tab(sheet_id, sheet_tab_id, len(headers))
 
     _known_tabs.add(tab_name)
 
@@ -121,93 +175,6 @@ def _ensure_tab_exists(service, sheet_id: str, tab_name: str, headers: list[str]
 def _citas_tab_name() -> str:
     negocio = os.getenv("BUSINESS_NAME", "Sin nombre")
     return f"{negocio} - Citas"
-
-
-def log_event(evento: str) -> None:
-    """Suma 1 al contador del evento en la fila del día de hoy (crea la fila
-    si es la primera vez hoy). Nunca lanza excepciones — un fallo aquí no
-    debe tumbar la respuesta al cliente."""
-    sheet_id = os.getenv("GOOGLE_SHEET_ID")
-    if not sheet_id or evento not in EVENT_COLUMN:
-        return
-
-    try:
-        service = _get_service()
-        if not service:
-            return
-
-        tab = os.getenv("BUSINESS_NAME", "Sin nombre")
-        _ensure_tab_exists(service, sheet_id, tab, SUMMARY_HEADERS)
-
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        col_index = EVENT_COLUMN[evento]
-        col_letter = chr(ord("A") + col_index)
-
-        result = service.spreadsheets().values().get(
-            spreadsheetId=sheet_id, range=f"'{tab}'!A2:A"
-        ).execute()
-        dates = [row[0] if row else "" for row in result.get("values", [])]
-
-        if today in dates:
-            row_number = dates.index(today) + 2
-            current = service.spreadsheets().values().get(
-                spreadsheetId=sheet_id, range=f"'{tab}'!{col_letter}{row_number}"
-            ).execute()
-            current_value = current.get("values", [["0"]])[0][0] if current.get("values") else "0"
-            service.spreadsheets().values().update(
-                spreadsheetId=sheet_id,
-                range=f"'{tab}'!{col_letter}{row_number}",
-                valueInputOption="RAW",
-                body={"values": [[int(current_value or 0) + 1]]},
-            ).execute()
-        else:
-            row = [today] + [0] * (len(SUMMARY_HEADERS) - 1)
-            row[col_index] = 1
-            service.spreadsheets().values().append(
-                spreadsheetId=sheet_id,
-                range=f"'{tab}'!A1",
-                valueInputOption="USER_ENTERED",
-                insertDataOption="INSERT_ROWS",
-                body={"values": [row]},
-            ).execute()
-    except Exception:
-        log.exception("No se pudo registrar el evento en Google Sheets")
-
-
-def add_pending_appointment(customer_wa_id: str, req: dict) -> int | None:
-    """Guarda una solicitud de cita como 'pendiente' en Sheets, para que
-    sobreviva aunque el servidor se reinicie antes de que el dueño conteste.
-    Devuelve el folio (número de fila) para poder referenciarla después."""
-    sheet_id = os.getenv("GOOGLE_SHEET_ID")
-    if not sheet_id:
-        log.warning("GOOGLE_SHEET_ID no configurado: la cita no queda persistida")
-        return None
-
-    try:
-        service = _get_service()
-        if not service:
-            return None
-        tab = _citas_tab_name()
-        _ensure_tab_exists(service, sheet_id, tab, CITAS_HEADERS)
-
-        result = service.spreadsheets().values().get(
-            spreadsheetId=sheet_id, range=f"'{tab}'!A2:A"
-        ).execute()
-        folio = len(result.get("values", [])) + 1
-
-        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-        row = [folio, timestamp, customer_wa_id, req["nombre"], req["servicio"], req["horario"], "pendiente"]
-        service.spreadsheets().values().append(
-            spreadsheetId=sheet_id,
-            range=f"'{tab}'!A1",
-            valueInputOption="USER_ENTERED",
-            insertDataOption="INSERT_ROWS",
-            body={"values": [row]},
-        ).execute()
-        return folio
-    except Exception:
-        log.exception("No se pudo guardar la solicitud de cita en Google Sheets")
-        return None
 
 
 def _row_to_appointment(row: list, row_number: int) -> dict:
@@ -222,6 +189,67 @@ def _row_to_appointment(row: list, row_number: int) -> dict:
     }
 
 
+# ─── Reporte diario ──────────────────────────────────────────────────────
+
+def log_event(evento: str) -> None:
+    """Suma 1 al contador del evento en la fila del día de hoy (crea la fila
+    si es la primera vez hoy). Nunca lanza excepciones — un fallo aquí no
+    debe tumbar la respuesta al cliente."""
+    sheet_id = os.getenv("GOOGLE_SHEET_ID")
+    if not sheet_id or evento not in EVENT_COLUMN:
+        return
+
+    try:
+        tab = os.getenv("BUSINESS_NAME", "Sin nombre")
+        _ensure_tab_exists(sheet_id, tab, SUMMARY_HEADERS)
+
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        col_index = EVENT_COLUMN[evento]
+        col_letter = chr(ord("A") + col_index)
+
+        rows = _values_get(sheet_id, f"'{tab}'!A2:A")
+        dates = [row[0] if row else "" for row in rows]
+
+        if today in dates:
+            row_number = dates.index(today) + 2
+            current = _values_get(sheet_id, f"'{tab}'!{col_letter}{row_number}")
+            current_value = current[0][0] if current and current[0] else "0"
+            _values_update(sheet_id, f"'{tab}'!{col_letter}{row_number}", [[int(current_value or 0) + 1]])
+        else:
+            row = [today] + [0] * (len(SUMMARY_HEADERS) - 1)
+            row[col_index] = 1
+            _values_append(sheet_id, f"'{tab}'!A1", [row])
+    except Exception:
+        log.exception("No se pudo registrar el evento en Google Sheets")
+
+
+# ─── Citas ───────────────────────────────────────────────────────────────
+
+def add_pending_appointment(customer_wa_id: str, req: dict) -> int | None:
+    """Guarda una solicitud de cita como 'pendiente' en Sheets, para que
+    sobreviva aunque el servidor se reinicie antes de que el dueño conteste.
+    Devuelve el folio (número de fila) para poder referenciarla después."""
+    sheet_id = os.getenv("GOOGLE_SHEET_ID")
+    if not sheet_id:
+        log.warning("GOOGLE_SHEET_ID no configurado: la cita no queda persistida")
+        return None
+
+    try:
+        tab = _citas_tab_name()
+        _ensure_tab_exists(sheet_id, tab, CITAS_HEADERS)
+
+        rows = _values_get(sheet_id, f"'{tab}'!A2:A")
+        folio = len(rows) + 1
+
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        row = [folio, timestamp, customer_wa_id, req["nombre"], req["servicio"], req["horario"], "pendiente"]
+        _values_append(sheet_id, f"'{tab}'!A1", [row])
+        return folio
+    except Exception:
+        log.exception("No se pudo guardar la solicitud de cita en Google Sheets")
+        return None
+
+
 def get_pending_appointment_by_folio(folio: int) -> dict | None:
     """Busca una solicitud pendiente por su número de folio (para cuando el
     dueño tiene varias solicitudes a la vez y contesta una específica)."""
@@ -229,17 +257,9 @@ def get_pending_appointment_by_folio(folio: int) -> dict | None:
     if not sheet_id:
         return None
     try:
-        service = _get_service()
-        if not service:
-            return None
         tab = _citas_tab_name()
-        _ensure_tab_exists(service, sheet_id, tab, CITAS_HEADERS)
-
-        result = service.spreadsheets().values().get(
-            spreadsheetId=sheet_id, range=f"'{tab}'!A2:G"
-        ).execute()
-        rows = result.get("values", [])
-
+        _ensure_tab_exists(sheet_id, tab, CITAS_HEADERS)
+        rows = _values_get(sheet_id, f"'{tab}'!A2:G")
         for i, row in enumerate(rows, start=2):
             if len(row) >= 7 and row[6] == "pendiente" and str(row[0]) == str(folio):
                 return _row_to_appointment(row, i)
@@ -255,19 +275,10 @@ def get_oldest_pending_appointment() -> dict | None:
     sheet_id = os.getenv("GOOGLE_SHEET_ID")
     if not sheet_id:
         return None
-
     try:
-        service = _get_service()
-        if not service:
-            return None
         tab = _citas_tab_name()
-        _ensure_tab_exists(service, sheet_id, tab, CITAS_HEADERS)
-
-        result = service.spreadsheets().values().get(
-            spreadsheetId=sheet_id, range=f"'{tab}'!A2:G"
-        ).execute()
-        rows = result.get("values", [])
-
+        _ensure_tab_exists(sheet_id, tab, CITAS_HEADERS)
+        rows = _values_get(sheet_id, f"'{tab}'!A2:G")
         for i, row in enumerate(rows, start=2):
             if len(row) >= 7 and row[6] == "pendiente":
                 return _row_to_appointment(row, i)
@@ -284,15 +295,9 @@ def list_pending_appointments() -> list[dict]:
     if not sheet_id:
         return []
     try:
-        service = _get_service()
-        if not service:
-            return []
         tab = _citas_tab_name()
-        _ensure_tab_exists(service, sheet_id, tab, CITAS_HEADERS)
-        result = service.spreadsheets().values().get(
-            spreadsheetId=sheet_id, range=f"'{tab}'!A2:G"
-        ).execute()
-        rows = result.get("values", [])
+        _ensure_tab_exists(sheet_id, tab, CITAS_HEADERS)
+        rows = _values_get(sheet_id, f"'{tab}'!A2:G")
         return [
             _row_to_appointment(row, i)
             for i, row in enumerate(rows, start=2)
@@ -308,22 +313,13 @@ def count_pending_appointments() -> int:
     if not sheet_id:
         return 0
     try:
-        service = _get_service()
-        if not service:
-            return 0
         tab = _citas_tab_name()
-        _ensure_tab_exists(service, sheet_id, tab, CITAS_HEADERS)
-        result = service.spreadsheets().values().get(
-            spreadsheetId=sheet_id, range=f"'{tab}'!A2:G"
-        ).execute()
-        rows = result.get("values", [])
+        _ensure_tab_exists(sheet_id, tab, CITAS_HEADERS)
+        rows = _values_get(sheet_id, f"'{tab}'!A2:G")
         return sum(1 for row in rows if len(row) >= 7 and row[6] == "pendiente")
     except Exception:
         log.exception("No se pudo contar las citas pendientes en Google Sheets")
         return 0
-
-
-_INACTIVE_STATES = ("rechazada", "cancelada_por_cliente")
 
 
 def get_customer_active_appointments(wa_id: str) -> list[dict]:
@@ -334,15 +330,9 @@ def get_customer_active_appointments(wa_id: str) -> list[dict]:
     if not sheet_id:
         return []
     try:
-        service = _get_service()
-        if not service:
-            return []
         tab = _citas_tab_name()
-        _ensure_tab_exists(service, sheet_id, tab, CITAS_HEADERS)
-        result = service.spreadsheets().values().get(
-            spreadsheetId=sheet_id, range=f"'{tab}'!A2:G"
-        ).execute()
-        rows = result.get("values", [])
+        _ensure_tab_exists(sheet_id, tab, CITAS_HEADERS)
+        rows = _values_get(sheet_id, f"'{tab}'!A2:G")
         return [
             _row_to_appointment(row, i)
             for i, row in enumerate(rows, start=2)
@@ -361,15 +351,9 @@ def get_appointment_by_folio(folio: int) -> dict | None:
     if not sheet_id:
         return None
     try:
-        service = _get_service()
-        if not service:
-            return None
         tab = _citas_tab_name()
-        _ensure_tab_exists(service, sheet_id, tab, CITAS_HEADERS)
-        result = service.spreadsheets().values().get(
-            spreadsheetId=sheet_id, range=f"'{tab}'!A2:G"
-        ).execute()
-        rows = result.get("values", [])
+        _ensure_tab_exists(sheet_id, tab, CITAS_HEADERS)
+        rows = _values_get(sheet_id, f"'{tab}'!A2:G")
         for i, row in enumerate(rows, start=2):
             if len(row) >= 7 and str(row[0]) == str(folio):
                 return _row_to_appointment(row, i)
@@ -385,16 +369,8 @@ def update_appointment_horario(row_number: int, nuevo_horario: str) -> None:
     if not sheet_id:
         return
     try:
-        service = _get_service()
-        if not service:
-            return
         tab = _citas_tab_name()
-        service.spreadsheets().values().update(
-            spreadsheetId=sheet_id,
-            range=f"'{tab}'!F{row_number}",
-            valueInputOption="RAW",
-            body={"values": [[nuevo_horario]]},
-        ).execute()
+        _values_update(sheet_id, f"'{tab}'!F{row_number}", [[nuevo_horario]])
     except Exception:
         log.exception("No se pudo actualizar el horario de la cita en Google Sheets")
 
@@ -404,17 +380,8 @@ def mark_appointment_resolved(row_number: int, estado: str) -> None:
     sheet_id = os.getenv("GOOGLE_SHEET_ID")
     if not sheet_id:
         return
-
     try:
-        service = _get_service()
-        if not service:
-            return
         tab = _citas_tab_name()
-        service.spreadsheets().values().update(
-            spreadsheetId=sheet_id,
-            range=f"'{tab}'!G{row_number}",
-            valueInputOption="RAW",
-            body={"values": [[estado]]},
-        ).execute()
+        _values_update(sheet_id, f"'{tab}'!G{row_number}", [[estado]])
     except Exception:
         log.exception("No se pudo marcar la cita como resuelta en Google Sheets")
