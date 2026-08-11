@@ -41,6 +41,14 @@ def normalize_mx_number(wa_id: str) -> str:
     return wa_id
 
 
+def get_owner_number() -> str | None:
+    """OWNER_PHONE_NUMBER normalizado — así no importa si se capturó con o
+    sin el '1' extra mexicano, siempre coincide contra el wa_id normalizado
+    de los mensajes entrantes (si no, el dueño se trataría como cliente)."""
+    owner = os.getenv("OWNER_PHONE_NUMBER")
+    return normalize_mx_number(owner) if owner else None
+
+
 def fetch_whatsapp_media(media_id: str) -> tuple[bytes, str] | None:
     """Descarga un archivo multimedia de WhatsApp (foto, audio, etc.).
     Devuelve (bytes_del_archivo, mime_type) o None si algo falla."""
@@ -104,7 +112,7 @@ def alert_daniel(message: str) -> None:
 
 
 def notify_owner_new_request(req: dict, folio: int | None, pending_count: int) -> None:
-    owner = os.getenv("OWNER_PHONE_NUMBER")
+    owner = get_owner_number()
     if not owner:
         alert_daniel(
             f"Se pidió una cita pero OWNER_PHONE_NUMBER no está configurado: {req}"
@@ -128,7 +136,7 @@ def notify_owner_new_request(req: dict, folio: int | None, pending_count: int) -
 
 
 def notify_owner_cancellation(cita: dict) -> None:
-    owner = os.getenv("OWNER_PHONE_NUMBER")
+    owner = get_owner_number()
     if not owner:
         return
     send_whatsapp_message(
@@ -141,7 +149,7 @@ def notify_owner_cancellation(cita: dict) -> None:
 
 
 def notify_owner_modification(cita: dict, nuevo_horario: str, pending_count: int) -> None:
-    owner = os.getenv("OWNER_PHONE_NUMBER")
+    owner = get_owner_number()
     if not owner:
         alert_daniel(
             f"Se pidió mover el folio #{cita['folio']} pero OWNER_PHONE_NUMBER "
@@ -166,7 +174,7 @@ def notify_owner_modification(cita: dict, nuevo_horario: str, pending_count: int
 
 
 def handle_owner_reply(text: str) -> None:
-    owner = os.getenv("OWNER_PHONE_NUMBER")
+    owner = get_owner_number()
     text = text.strip()
 
     # Formato estricto y explícito para referenciar un folio: '#3 SI'.
@@ -288,7 +296,7 @@ def receive_message():
 
     log.info("Mensaje de %s (tipo: %s)", wa_id, msg_type)
 
-    owner = os.getenv("OWNER_PHONE_NUMBER")
+    owner = get_owner_number()
     if owner and wa_id == owner:
         handle_owner_reply(incoming.get("text", {}).get("body", ""))
         return "OK", 200
