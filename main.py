@@ -173,61 +173,9 @@ def notify_owner_modification(cita: dict, nuevo_horario: str, pending_count: int
     )
 
 
-def handle_owner_reply(text: str) -> None:
-    owner = get_owner_number()
-    text = text.strip()
-
-    # Formato estricto y explícito para referenciar un folio: '#3 SI'.
-    # A propósito NO se busca cualquier número suelto en el texto — una
-    # respuesta como "a las 17:00" contiene un número que NO es un folio,
-    # y confundirlo con uno resolvería la cita equivocada. Cero margen para
-    # eso: o el folio viene marcado sin ambigüedad, o no se adivina nada.
-    folio_match = re.match(r"^#(\d+)\s+(.*)$", text)
-
-    if folio_match:
-        req = get_pending_appointment_by_folio(int(folio_match.group(1)))
-        reply_text = folio_match.group(2).strip()
-        if not req:
-            send_whatsapp_message(
-                owner,
-                f"No encontré una solicitud pendiente con el folio #{folio_match.group(1)}. "
-                f"Revisa el número e intenta de nuevo.",
-            )
-            return
-    else:
-        pending = list_pending_appointments()
-        if len(pending) == 0:
-            # Nada pendiente: podría ser un aviso de cierre/horario especial
-            # en vez de una respuesta de cita — se interpreta con Claude en
-            # vez de asumir que no tiene sentido.
-            aviso = interpret_owner_instruction(text)
-            if aviso:
-                save_business_notice(aviso)
-                send_whatsapp_message(owner, f'Anotado — les voy a avisar a los clientes: "{aviso}"')
-                log_event("aviso_negocio_actualizado")
-            else:
-                send_whatsapp_message(
-                    owner,
-                    "No tengo ninguna solicitud de cita pendiente ahora mismo. "
-                    "Si quieres avisar de un cierre especial o cambio de "
-                    "horario, dime algo como 'mañana cerraremos' o 'el "
-                    "jueves cerramos a las 2pm'.",
-                )
-            return
-        if len(pending) > 1:
-            # Varias pendientes y no especificó folio — no se adivina, se pregunta.
-            lista = "\n".join(
-                f"#{p['folio']} — {p['nombre']} ({p['servicio']}, {p['horario']})" for p in pending
-            )
-            send_whatsapp_message(
-                owner,
-                f"Tienes {len(pending)} solicitudes de cita pendientes — dime a cuál te "
-                f"refieres empezando tu respuesta con su folio, ej. '#{pending[0]['folio']} SI':\n\n{lista}",
-            )
-            return
-        req = pending[0]
-        reply_text = text
-
+def _resolve_citas_reply(req: dict, reply_text: str) -> None:
+    """Aplica la respuesta del dueño (SI/NO/horario alternativo) a una
+    solicitud de cita específica ya identificada sin ambigüedad."""
     reply_normalized = reply_text.strip().lower()
 
     if reply_normalized in ("si", "sí", "yes", "ok", "dale"):
@@ -254,6 +202,76 @@ def handle_owner_reply(text: str) -> None:
             f"proponemos: {reply_text}. ¿Te funciona?",
         )
         mark_appointment_resolved(req["row_number"], f"horario_alternativo: {reply_text[:100]}")
+
+
+def _send_pending_list_prompt(owner: str, pending: list[dict]) -> None:
+    lista = "\n".join(
+        f"#{p['folio']} — {p['nombre']} ({p['servicio']}, {p['horario']})" for p in pending
+    )
+    send_whatsapp_message(
+        owner,
+        f"Tienes {len(pending)} solicitudes de cita pendientes — dime a cuál te "
+        f"refieres empezando tu respuesta con su folio, ej. '#{pending[0]['folio']} SI':\n\n{lista}",
+    )
+
+
+def handle_owner_reply(text: str) -> None:
+    owner = get_owner_number()
+    text = text.strip()
+
+    # Formato estricto y explícito para referenciar un folio: '#3 SI'.
+    # A propósito NO se busca cualquier número suelto en el texto — una
+    # respuesta como "a las 17:00" contiene un número que NO es un folio,
+    # y confundirlo con uno resolvería la cita equivocada. Cero margen para
+    # eso: o el folio viene marcado sin ambigüedad, o no se adivina nada.
+    folio_match = re.match(r"^#(\d+)\s+(.*)$", text)
+    if folio_match:
+        req = get_pending_appointment_by_folio(int(folio_match.group(1)))
+        if not req:
+            send_whatsapp_message(
+                owner,
+                f"No encontré una solicitud pendiente con el folio #{folio_match.group(1)}. "
+                f"Revisa el número e intenta de nuevo.",
+            )
+            return
+        _resolve_citas_reply(req, folio_match.group(2).strip())
+        return
+
+    pending = list_pending_appointments()
+    is_exact_reply = text.lower() in ("si", "sí", "yes", "ok", "dale", "no")
+
+    if pending and len(pending) == 1 and is_exact_reply:
+        # Único caso simple e inequívoco sin necesitar folio ni Claude.
+        _resolve_citas_reply(pending[0], text)
+        return
+
+    if pending and len(pending) > 1 and is_exact_reply:
+        # SI/NO sin folio con varias pendientes — no se adivina cuál.
+        _send_pending_list_prompt(owner, pending)
+        return
+
+    # Aquí el texto no es un SI/NO limpio (o no hay nada pendiente) — es
+    # ambiguo entre "propuesta de horario para la única pendiente" y "aviso
+    # de negocio" (cierre, cambio de horario). No se asume, se le pregunta
+    # a Claude qué es en realidad.
+    aviso = interpret_owner_instruction(text)
+    if aviso:
+        save_business_notice(aviso)
+        send_whatsapp_message(owner, f'Anotado — les voy a avisar a los clientes: "{aviso}"')
+        log_event("aviso_negocio_actualizado")
+        return
+
+    if not pending:
+        send_whatsapp_message(
+            owner,
+            "No tengo ninguna solicitud de cita pendiente ahora mismo. "
+            "Si quieres avisar de un cierre especial o cambio de horario, "
+            "dime algo como 'mañana cerraremos' o 'el jueves cerramos a las 2pm'.",
+        )
+    elif len(pending) == 1:
+        _resolve_citas_reply(pending[0], text)
+    else:
+        _send_pending_list_prompt(owner, pending)
 
 
 @app.get("/webhook")
