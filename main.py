@@ -49,6 +49,31 @@ def get_owner_number() -> str | None:
     return normalize_mx_number(owner) if owner else None
 
 
+def get_notify_also_numbers() -> list[str]:
+    """Números adicionales (recepcionista, encargados) que reciben copia
+    informativa de los avisos de citas — opcional, solo si el negocio lo
+    pide. A diferencia del dueño, no pueden confirmar/cancelar/mover citas:
+    si le escriben al bot, se les trata como clientes normales, para no
+    tener dos personas con poder de decisión sobre la misma solicitud."""
+    raw = os.getenv("NOTIFY_ALSO_PHONE_NUMBERS", "")
+    return [normalize_mx_number(n.strip()) for n in raw.split(",") if n.strip()]
+
+
+def notify_staff(owner_message: str, staff_note: str) -> None:
+    """Manda el aviso completo (con instrucciones de acción) al dueño, y una
+    copia informativa (sin instrucciones, para no confundirlos con acciones
+    que no pueden tomar) a cualquier encargado adicional configurado."""
+    owner = get_owner_number()
+    if owner:
+        send_whatsapp_message(owner, owner_message)
+    for number in get_notify_also_numbers():
+        send_whatsapp_message(
+            number,
+            f"(Aviso informativo — solo el encargado principal puede "
+            f"confirmar/cancelar)\n\n{staff_note}",
+        )
+
+
 def fetch_whatsapp_media(media_id: str) -> tuple[bytes, str] | None:
     """Descarga un archivo multimedia de WhatsApp (foto, audio, etc.).
     Devuelve (bytes_del_archivo, mime_type) o None si algo falla."""
@@ -112,8 +137,7 @@ def alert_daniel(message: str) -> None:
 
 
 def notify_owner_new_request(req: dict, folio: int | None, pending_count: int) -> None:
-    owner = get_owner_number()
-    if not owner:
+    if not get_owner_number():
         alert_daniel(
             f"Se pidió una cita pero OWNER_PHONE_NUMBER no está configurado: {req}"
         )
@@ -125,32 +149,29 @@ def notify_owner_new_request(req: dict, folio: int | None, pending_count: int) -
         # Es la única pendiente — no hace falta que escriba el folio
         instrucciones = "Contesta *SI* para confirmar, *NO* para rechazar, u otro horario."
 
-    send_whatsapp_message(
-        owner,
+    hechos = (
         f"📅 Solicitud de cita {folio_txt}\n"
         f"Nombre: {req['nombre']}\n"
         f"Servicio: {req['servicio']}\n"
-        f"Horario pedido: {req['horario']}\n\n"
-        f"{instrucciones}",
+        f"Horario pedido: {req['horario']}"
     )
+    notify_staff(f"{hechos}\n\n{instrucciones}", hechos)
 
 
 def notify_owner_cancellation(cita: dict) -> None:
-    owner = get_owner_number()
-    if not owner:
+    if not get_owner_number():
         return
-    send_whatsapp_message(
-        owner,
+    hechos = (
         f"❌ Folio #{cita['folio']} cancelada por el cliente\n"
         f"Nombre: {cita['nombre']}\n"
         f"Servicio: {cita['servicio']}\n"
-        f"Horario: {cita['horario']}",
+        f"Horario: {cita['horario']}"
     )
+    notify_staff(hechos, hechos)
 
 
 def notify_owner_modification(cita: dict, nuevo_horario: str, pending_count: int) -> None:
-    owner = get_owner_number()
-    if not owner:
+    if not get_owner_number():
         alert_daniel(
             f"Se pidió mover el folio #{cita['folio']} pero OWNER_PHONE_NUMBER "
             f"no está configurado."
@@ -162,15 +183,14 @@ def notify_owner_modification(cita: dict, nuevo_horario: str, pending_count: int
     if pending_count <= 1:
         instrucciones = "Contesta *SI* para confirmar, *NO* para rechazar, u otro horario."
 
-    send_whatsapp_message(
-        owner,
+    hechos = (
         f"🔄 Folio {folio_txt} — cambio de horario solicitado\n"
         f"Nombre: {cita['nombre']}\n"
         f"Servicio: {cita['servicio']}\n"
         f"Horario anterior: {cita['horario']}\n"
-        f"Horario nuevo pedido: {nuevo_horario}\n\n"
-        f"{instrucciones}",
+        f"Horario nuevo pedido: {nuevo_horario}"
     )
+    notify_staff(f"{hechos}\n\n{instrucciones}", hechos)
 
 
 def _resolve_citas_reply(req: dict, reply_text: str) -> None:
