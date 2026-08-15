@@ -17,15 +17,19 @@ def _headers() -> dict:
     return {"Authorization": f"Bearer {os.getenv('UPSTASH_REDIS_REST_TOKEN', '')}"}
 
 
-def get_history(wa_id: str) -> list[dict]:
+def get_history(business_id: str, wa_id: str) -> list[dict]:
     """Lee el historial de conversacion desde Upstash. Lista vacia si no hay
     nada guardado o si Upstash no esta configurado (nunca lanza excepciones,
-    para no tumbar la respuesta al cliente por un fallo de memoria)."""
+    para no tumbar la respuesta al cliente por un fallo de memoria).
+
+    La clave incluye business_id porque el mismo número de cliente puede
+    escribirle a bots de negocios distintos — sin el prefijo, sus
+    conversaciones con negocios distintos se mezclarían entre sí."""
     url = _base_url()
     if not url:
         return []
     try:
-        resp = requests.get(f"{url}/get/conv:{wa_id}", headers=_headers(), timeout=10)
+        resp = requests.get(f"{url}/get/conv:{business_id}:{wa_id}", headers=_headers(), timeout=10)
         resp.raise_for_status()
         result = resp.json().get("result")
         return json.loads(result) if result else []
@@ -34,7 +38,7 @@ def get_history(wa_id: str) -> list[dict]:
         return []
 
 
-def save_history(wa_id: str, history: list[dict]) -> None:
+def save_history(business_id: str, wa_id: str, history: list[dict]) -> None:
     """Guarda el historial con expiración de 3 días (SETEX) — así las
     conversaciones viejas se limpian solas, sin llenar el espacio gratis."""
     url = _base_url()
@@ -42,7 +46,7 @@ def save_history(wa_id: str, history: list[dict]) -> None:
         return
     try:
         resp = requests.post(
-            f"{url}/setex/conv:{wa_id}/{TTL_SECONDS}",
+            f"{url}/setex/conv:{business_id}:{wa_id}/{TTL_SECONDS}",
             headers=_headers(),
             data=json.dumps(history),
             timeout=10,
@@ -53,20 +57,21 @@ def save_history(wa_id: str, history: list[dict]) -> None:
 
 
 NOTICE_TTL_SECONDS = 7 * 24 * 60 * 60  # 7 dias: se limpia sola si el dueño olvida quitarlo
+BUSINESS_CONFIG_TTL_SECONDS = 5 * 60  # 5 minutos: balance entre no golpear Sheets en cada mensaje y que un alta/baja de cliente se refleje rápido
 
 
-def _notice_key() -> str:
-    return f"aviso:{os.getenv('BUSINESS_NAME', 'default')}"
+def _notice_key(business_id: str) -> str:
+    return f"aviso:{business_id}"
 
 
-def get_business_notice() -> str | None:
+def get_business_notice(business_id: str) -> str | None:
     """Aviso temporal del negocio (cierre especial, cambio de horario), o
     None si no hay ninguno vigente."""
     url = _base_url()
     if not url:
         return None
     try:
-        resp = requests.get(f"{url}/get/{_notice_key()}", headers=_headers(), timeout=10)
+        resp = requests.get(f"{url}/get/{_notice_key(business_id)}", headers=_headers(), timeout=10)
         resp.raise_for_status()
         return resp.json().get("result")
     except Exception:
@@ -74,7 +79,7 @@ def get_business_notice() -> str | None:
         return None
 
 
-def save_business_notice(aviso: str) -> None:
+def save_business_notice(business_id: str, aviso: str) -> None:
     """Guarda el aviso con expiración de 7 días — el dueño no tiene que
     acordarse de quitarlo, se limpia solo."""
     url = _base_url()
@@ -82,7 +87,7 @@ def save_business_notice(aviso: str) -> None:
         return
     try:
         resp = requests.post(
-            f"{url}/setex/{_notice_key()}/{NOTICE_TTL_SECONDS}",
+            f"{url}/setex/{_notice_key(business_id)}/{NOTICE_TTL_SECONDS}",
             headers=_headers(),
             data=aviso,
             timeout=10,
@@ -90,6 +95,40 @@ def save_business_notice(aviso: str) -> None:
         resp.raise_for_status()
     except Exception:
         log.exception("No se pudo guardar el aviso del negocio en Upstash")
+
+
+def get_cached_business_config(phone_number_id: str) -> dict | None:
+    """Config de negocio cacheada (evita leer la pestaña 'Clientes' de
+    Sheets en cada mensaje entrante). None si no hay nada en cache — no
+    distingue "no existe el negocio" de "no está cacheado", quien llama debe
+    ir a Sheets en ambos casos."""
+    url = _base_url()
+    if not url:
+        return None
+    try:
+        resp = requests.get(f"{url}/get/negocio:{phone_number_id}", headers=_headers(), timeout=10)
+        resp.raise_for_status()
+        result = resp.json().get("result")
+        return json.loads(result) if result else None
+    except Exception:
+        log.exception("No se pudo leer la config de negocio cacheada desde Upstash")
+        return None
+
+
+def save_cached_business_config(phone_number_id: str, config: dict) -> None:
+    url = _base_url()
+    if not url:
+        return
+    try:
+        resp = requests.post(
+            f"{url}/setex/negocio:{phone_number_id}/{BUSINESS_CONFIG_TTL_SECONDS}",
+            headers=_headers(),
+            data=json.dumps(config),
+            timeout=10,
+        )
+        resp.raise_for_status()
+    except Exception:
+        log.exception("No se pudo guardar la config de negocio en cache en Upstash")
 
 
 def is_duplicate_message(message_id: str) -> bool:

@@ -120,11 +120,10 @@ ANNOUNCEMENT_TOOL = {
 }
 
 
-def interpret_owner_instruction(text: str) -> str | None:
+def interpret_owner_instruction(negocio: str, text: str) -> str | None:
     """Le pregunta a Claude si este mensaje del DUEÑO es un aviso de cierre
     especial / cambio de horario. Devuelve el aviso redactado a guardar, o
     None si el mensaje no es eso."""
-    negocio = os.getenv("BUSINESS_NAME", "este negocio")
     message = get_client().messages.create(
         model=MODEL,
         max_tokens=300,
@@ -148,8 +147,12 @@ def interpret_owner_instruction(text: str) -> str | None:
     return tool_block["input"]["aviso"] if tool_block else None
 
 
-def _system_prompt(citas_activas: list[dict], aviso_negocio: str | None) -> str:
-    negocio = os.getenv("BUSINESS_NAME", "este negocio")
+def _system_prompt(negocio: str, info_negocio: str, citas_activas: list[dict], aviso_negocio: str | None) -> str:
+    info_texto = (
+        f"\nINFORMACIÓN DE ESTE NEGOCIO — úsala para contestar preguntas de "
+        f"horarios, precios y servicios, es la fuente de verdad:\n{info_negocio}\n"
+        if info_negocio else ""
+    )
 
     if citas_activas:
         lineas = "\n".join(
@@ -173,6 +176,7 @@ Responde dudas de clientes de forma breve, cálida y directa, como lo haría
 un empleado que conoce bien el negocio. Nunca inventes precios, horarios o
 datos que no tengas — si no sabes algo, dilo y ofrece tomar el dato de
 contacto para que alguien del negocio confirme.
+{info_texto}
 {aviso_texto}
 {citas_texto}
 
@@ -228,6 +232,8 @@ def _trim(history: list[dict]) -> list[dict]:
 
 
 def _call_claude(
+    negocio: str,
+    info_negocio: str,
     history: list[dict],
     citas_activas: list[dict],
     aviso_negocio: str | None,
@@ -240,7 +246,7 @@ def _call_claude(
         system=[
             {
                 "type": "text",
-                "text": _system_prompt(citas_activas, aviso_negocio),
+                "text": _system_prompt(negocio, info_negocio, citas_activas, aviso_negocio),
                 "cache_control": {"type": "ephemeral"},
             }
         ],
@@ -262,11 +268,18 @@ def _looks_like_fake_confirmation(text: str) -> bool:
 
 
 def ask_agent(
+    business: dict,
     wa_id: str,
     user_message: str | list[dict],
     stored_message: str | list[dict] | None = None,
 ) -> tuple[str, dict | None, bool]:
     """Devuelve (texto_para_el_cliente, accion, alucinacion_detectada).
+
+    business: dict con "phone_number_id", "name", "owner_phone",
+    "notify_also" — resuelto por services.business.get_business_config a
+    partir del número de WhatsApp que recibió el mensaje. Así el mismo
+    despliegue atiende a varios negocios a la vez, cada uno con su propio
+    número, su propia pestaña de citas y su propia memoria de conversación.
 
     accion es None, o un dict con "type" en {"crear", "cancelar", "modificar"}:
     - crear: {"type": "crear", "nombre", "servicio", "horario"}
@@ -281,14 +294,17 @@ def ask_agent(
     vez de user_message — para no arrastrar contenido pesado (fotos en
     base64) en cada turno futuro de la conversación, que infla memoria y
     costo de API cada vez que se reenvía el historial completo."""
-    citas_activas = get_customer_active_appointments(wa_id)
-    aviso_negocio = get_business_notice()
+    business_id = business["phone_number_id"]
+    negocio = business["name"]
+    info_negocio = business.get("info", "")
+    citas_activas = get_customer_active_appointments(negocio, wa_id)
+    aviso_negocio = get_business_notice(business_id)
 
-    history = _load_history(wa_id)
+    history = _load_history(business_id, wa_id)
     user_index = len(history)
     history.append({"role": "user", "content": user_message})
 
-    content, text, tool_block = _call_claude(history, citas_activas, aviso_negocio)
+    content, text, tool_block = _call_claude(negocio, info_negocio, history, citas_activas, aviso_negocio)
     history.append({"role": "assistant", "content": content})
 
     hallucination_detected = False
@@ -298,7 +314,7 @@ def ask_agent(
         # forzamos en un segundo intento antes de rendirnos.
         hallucination_detected = True
         retry_content, _, retry_tool_block = _call_claude(
-            history[:-1], citas_activas, aviso_negocio, force_any_tool=True
+            negocio, info_negocio, history[:-1], citas_activas, aviso_negocio, force_any_tool=True
         )
         if retry_tool_block:
             content, tool_block = retry_content, retry_tool_block
@@ -351,5 +367,5 @@ def ask_agent(
     if stored_message is not None:
         history[user_index] = {"role": "user", "content": stored_message}
 
-    _save_history(wa_id, _trim(history))
+    _save_history(business_id, wa_id, _trim(history))
     return reply, action, hallucination_detected

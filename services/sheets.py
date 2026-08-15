@@ -39,6 +39,16 @@ EVENT_COLUMN = {
 CITAS_HEADERS = ["Folio", "Fecha", "customer_wa_id", "nombre", "servicio", "horario", "estado"]
 _INACTIVE_STATES = ("rechazada", "cancelada_por_cliente")
 
+# Pestaña de control con un renglón por negocio dado de alta — permite que
+# un mismo despliegue atienda a varios negocios a la vez, cada uno con su
+# propio número de WhatsApp, sin tocar código ni variables de entorno para
+# dar de alta uno nuevo.
+CLIENTES_TAB = "Clientes"
+CLIENTES_HEADERS = [
+    "Phone Number ID", "Nombre del negocio", "Teléfono del dueño",
+    "Teléfonos adicionales", "Activo", "Información del negocio",
+]
+
 
 # ─── Capa de transporte: REST directo con `requests`, sin la librería ──────
 # pesada google-api-python-client (que arrastra httplib2/protobuf/google-api-
@@ -172,9 +182,8 @@ def _ensure_tab_exists(sheet_id: str, tab_name: str, headers: list[str]) -> None
     _known_tabs.add(tab_name)
 
 
-def _citas_tab_name() -> str:
-    negocio = os.getenv("BUSINESS_NAME", "Sin nombre")
-    return f"{negocio} - Citas"
+def _citas_tab_name(business_name: str) -> str:
+    return f"{business_name} - Citas"
 
 
 def _row_to_appointment(row: list, row_number: int) -> dict:
@@ -191,7 +200,7 @@ def _row_to_appointment(row: list, row_number: int) -> dict:
 
 # ─── Reporte diario ──────────────────────────────────────────────────────
 
-def log_event(evento: str) -> None:
+def log_event(business_name: str, evento: str) -> None:
     """Suma 1 al contador del evento en la fila del día de hoy (crea la fila
     si es la primera vez hoy). Nunca lanza excepciones — un fallo aquí no
     debe tumbar la respuesta al cliente."""
@@ -200,7 +209,7 @@ def log_event(evento: str) -> None:
         return
 
     try:
-        tab = os.getenv("BUSINESS_NAME", "Sin nombre")
+        tab = business_name
         _ensure_tab_exists(sheet_id, tab, SUMMARY_HEADERS)
 
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -225,7 +234,7 @@ def log_event(evento: str) -> None:
 
 # ─── Citas ───────────────────────────────────────────────────────────────
 
-def add_pending_appointment(customer_wa_id: str, req: dict) -> int | None:
+def add_pending_appointment(business_name: str, customer_wa_id: str, req: dict) -> int | None:
     """Guarda una solicitud de cita como 'pendiente' en Sheets, para que
     sobreviva aunque el servidor se reinicie antes de que el dueño conteste.
     Devuelve el folio (número de fila) para poder referenciarla después."""
@@ -235,7 +244,7 @@ def add_pending_appointment(customer_wa_id: str, req: dict) -> int | None:
         return None
 
     try:
-        tab = _citas_tab_name()
+        tab = _citas_tab_name(business_name)
         _ensure_tab_exists(sheet_id, tab, CITAS_HEADERS)
 
         rows = _values_get(sheet_id, f"'{tab}'!A2:A")
@@ -250,14 +259,14 @@ def add_pending_appointment(customer_wa_id: str, req: dict) -> int | None:
         return None
 
 
-def get_pending_appointment_by_folio(folio: int) -> dict | None:
+def get_pending_appointment_by_folio(business_name: str, folio: int) -> dict | None:
     """Busca una solicitud pendiente por su número de folio (para cuando el
     dueño tiene varias solicitudes a la vez y contesta una específica)."""
     sheet_id = os.getenv("GOOGLE_SHEET_ID")
     if not sheet_id:
         return None
     try:
-        tab = _citas_tab_name()
+        tab = _citas_tab_name(business_name)
         _ensure_tab_exists(sheet_id, tab, CITAS_HEADERS)
         rows = _values_get(sheet_id, f"'{tab}'!A2:G")
         for i, row in enumerate(rows, start=2):
@@ -269,14 +278,14 @@ def get_pending_appointment_by_folio(folio: int) -> dict | None:
         return None
 
 
-def get_oldest_pending_appointment() -> dict | None:
+def get_oldest_pending_appointment(business_name: str) -> dict | None:
     """Devuelve la solicitud de cita 'pendiente' más antigua (fallback
     cuando el dueño no especifica un folio)."""
     sheet_id = os.getenv("GOOGLE_SHEET_ID")
     if not sheet_id:
         return None
     try:
-        tab = _citas_tab_name()
+        tab = _citas_tab_name(business_name)
         _ensure_tab_exists(sheet_id, tab, CITAS_HEADERS)
         rows = _values_get(sheet_id, f"'{tab}'!A2:G")
         for i, row in enumerate(rows, start=2):
@@ -288,14 +297,14 @@ def get_oldest_pending_appointment() -> dict | None:
         return None
 
 
-def list_pending_appointments() -> list[dict]:
+def list_pending_appointments(business_name: str) -> list[dict]:
     """Devuelve TODAS las solicitudes pendientes (no solo la más antigua) —
     para mostrárselas completas al dueño cuando tiene que elegir cuál."""
     sheet_id = os.getenv("GOOGLE_SHEET_ID")
     if not sheet_id:
         return []
     try:
-        tab = _citas_tab_name()
+        tab = _citas_tab_name(business_name)
         _ensure_tab_exists(sheet_id, tab, CITAS_HEADERS)
         rows = _values_get(sheet_id, f"'{tab}'!A2:G")
         return [
@@ -308,12 +317,12 @@ def list_pending_appointments() -> list[dict]:
         return []
 
 
-def count_pending_appointments() -> int:
+def count_pending_appointments(business_name: str) -> int:
     sheet_id = os.getenv("GOOGLE_SHEET_ID")
     if not sheet_id:
         return 0
     try:
-        tab = _citas_tab_name()
+        tab = _citas_tab_name(business_name)
         _ensure_tab_exists(sheet_id, tab, CITAS_HEADERS)
         rows = _values_get(sheet_id, f"'{tab}'!A2:G")
         return sum(1 for row in rows if len(row) >= 7 and row[6] == "pendiente")
@@ -322,7 +331,7 @@ def count_pending_appointments() -> int:
         return 0
 
 
-def get_customer_active_appointments(wa_id: str) -> list[dict]:
+def get_customer_active_appointments(business_name: str, wa_id: str) -> list[dict]:
     """Citas activas (ni rechazadas ni canceladas) de un cliente específico —
     para que el bot sepa qué citas ya tiene antes de crear, cancelar o
     modificar, en vez de adivinar o confundir una cita nueva con una vieja."""
@@ -330,7 +339,7 @@ def get_customer_active_appointments(wa_id: str) -> list[dict]:
     if not sheet_id:
         return []
     try:
-        tab = _citas_tab_name()
+        tab = _citas_tab_name(business_name)
         _ensure_tab_exists(sheet_id, tab, CITAS_HEADERS)
         rows = _values_get(sheet_id, f"'{tab}'!A2:G")
         return [
@@ -343,7 +352,7 @@ def get_customer_active_appointments(wa_id: str) -> list[dict]:
         return []
 
 
-def get_appointment_by_folio(folio: int) -> dict | None:
+def get_appointment_by_folio(business_name: str, folio: int) -> dict | None:
     """Busca una cita por folio sin importar su estado (a diferencia de
     get_pending_appointment_by_folio, que solo busca 'pendiente') — para
     validar cancelaciones/modificaciones contra el estado real."""
@@ -351,7 +360,7 @@ def get_appointment_by_folio(folio: int) -> dict | None:
     if not sheet_id:
         return None
     try:
-        tab = _citas_tab_name()
+        tab = _citas_tab_name(business_name)
         _ensure_tab_exists(sheet_id, tab, CITAS_HEADERS)
         rows = _values_get(sheet_id, f"'{tab}'!A2:G")
         for i, row in enumerate(rows, start=2):
@@ -363,25 +372,57 @@ def get_appointment_by_folio(folio: int) -> dict | None:
         return None
 
 
-def update_appointment_horario(row_number: int, nuevo_horario: str) -> None:
+def update_appointment_horario(business_name: str, row_number: int, nuevo_horario: str) -> None:
     """Actualiza solo la columna 'horario' de una fila específica."""
     sheet_id = os.getenv("GOOGLE_SHEET_ID")
     if not sheet_id:
         return
     try:
-        tab = _citas_tab_name()
+        tab = _citas_tab_name(business_name)
         _values_update(sheet_id, f"'{tab}'!F{row_number}", [[nuevo_horario]])
     except Exception:
         log.exception("No se pudo actualizar el horario de la cita en Google Sheets")
 
 
-def mark_appointment_resolved(row_number: int, estado: str) -> None:
+def mark_appointment_resolved(business_name: str, row_number: int, estado: str) -> None:
     """Actualiza la columna 'estado' de una fila específica de citas."""
     sheet_id = os.getenv("GOOGLE_SHEET_ID")
     if not sheet_id:
         return
     try:
-        tab = _citas_tab_name()
+        tab = _citas_tab_name(business_name)
         _values_update(sheet_id, f"'{tab}'!G{row_number}", [[estado]])
     except Exception:
         log.exception("No se pudo marcar la cita como resuelta en Google Sheets")
+
+
+# ─── Config de negocios (multi-tenant) ──────────────────────────────────
+
+def get_business_config_row(phone_number_id: str) -> dict | None:
+    """Busca en la pestaña 'Clientes' el negocio dueño de este
+    phone_number_id (el número de WhatsApp que recibió el mensaje). None si
+    no hay ningún negocio dado de alta con ese número, o si está marcado
+    como inactivo (cliente canceló mantenimiento — se apaga sin borrar
+    nada, por si vuelve a activarse después)."""
+    sheet_id = os.getenv("GOOGLE_SHEET_ID")
+    if not sheet_id:
+        return None
+    try:
+        _ensure_tab_exists(sheet_id, CLIENTES_TAB, CLIENTES_HEADERS)
+        rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:F")
+        for row in rows:
+            if len(row) >= 1 and row[0].strip() == phone_number_id:
+                activo = row[4].strip().upper() if len(row) > 4 else "SI"
+                if activo not in ("SI", "SÍ", "YES", "TRUE", "1"):
+                    return None
+                return {
+                    "phone_number_id": row[0].strip(),
+                    "name": row[1].strip() if len(row) > 1 else "",
+                    "owner_phone": row[2].strip() if len(row) > 2 else "",
+                    "notify_also": row[3].strip() if len(row) > 3 else "",
+                    "info": row[5].strip() if len(row) > 5 else "",
+                }
+        return None
+    except Exception:
+        log.exception("No se pudo leer la pestaña Clientes de Google Sheets")
+        return None

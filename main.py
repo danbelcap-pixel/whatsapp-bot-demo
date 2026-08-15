@@ -8,10 +8,10 @@ from dotenv import load_dotenv
 from flask import Flask, request
 
 from agent.client import ask_agent, interpret_owner_instruction
+from services.business import get_business_config
 from services.memory import is_duplicate_message, save_business_notice
 from services.sheets import (
     add_pending_appointment,
-    count_pending_appointments,
     get_appointment_by_folio,
     get_pending_appointment_by_folio,
     list_pending_appointments,
@@ -41,42 +41,47 @@ def normalize_mx_number(wa_id: str) -> str:
     return wa_id
 
 
-def get_owner_number() -> str | None:
-    """OWNER_PHONE_NUMBER normalizado — así no importa si se capturó con o
-    sin el '1' extra mexicano, siempre coincide contra el wa_id normalizado
-    de los mensajes entrantes (si no, el dueño se trataría como cliente)."""
-    owner = os.getenv("OWNER_PHONE_NUMBER")
+def get_owner_number(business: dict) -> str | None:
+    """Teléfono del dueño de ESTE negocio, normalizado — así no importa si
+    se capturó con o sin el '1' extra mexicano, siempre coincide contra el
+    wa_id normalizado de los mensajes entrantes (si no, el dueño se
+    trataría como cliente)."""
+    owner = business.get("owner_phone")
     return normalize_mx_number(owner) if owner else None
 
 
-def get_notify_also_numbers() -> list[str]:
+def get_notify_also_numbers(business: dict) -> list[str]:
     """Números adicionales (recepcionista, encargados) que reciben copia
     informativa de los avisos de citas — opcional, solo si el negocio lo
     pide. A diferencia del dueño, no pueden confirmar/cancelar/mover citas:
     si le escriben al bot, se les trata como clientes normales, para no
     tener dos personas con poder de decisión sobre la misma solicitud."""
-    raw = os.getenv("NOTIFY_ALSO_PHONE_NUMBERS", "")
+    raw = business.get("notify_also", "") or ""
     return [normalize_mx_number(n.strip()) for n in raw.split(",") if n.strip()]
 
 
-def notify_staff(owner_message: str, staff_note: str) -> None:
-    """Manda el aviso completo (con instrucciones de acción) al dueño, y una
-    copia informativa (sin instrucciones, para no confundirlos con acciones
-    que no pueden tomar) a cualquier encargado adicional configurado."""
-    owner = get_owner_number()
+def notify_staff(
+    business: dict,
+    owner_template: str, owner_params: list[str],
+    notify_template: str, notify_params: list[str],
+) -> None:
+    """Manda la plantilla con instrucciones de acción al dueño, y una
+    plantilla informativa (sin instrucciones, para no confundirlos con
+    acciones que no pueden tomar) a cualquier encargado adicional
+    configurado. Usa plantillas, no texto libre, porque este aviso lo
+    inicia el bot por su cuenta — no es respuesta a un mensaje reciente."""
+    owner = get_owner_number(business)
     if owner:
-        send_whatsapp_message(owner, owner_message)
-    for number in get_notify_also_numbers():
-        send_whatsapp_message(
-            number,
-            f"(Aviso informativo — solo el encargado principal puede "
-            f"confirmar/cancelar)\n\n{staff_note}",
-        )
+        send_whatsapp_template(business, owner, owner_template, owner_params)
+    for number in get_notify_also_numbers(business):
+        send_whatsapp_template(business, number, notify_template, notify_params)
 
 
 def fetch_whatsapp_media(media_id: str) -> tuple[bytes, str] | None:
     """Descarga un archivo multimedia de WhatsApp (foto, audio, etc.).
-    Devuelve (bytes_del_archivo, mime_type) o None si algo falla."""
+    Devuelve (bytes_del_archivo, mime_type) o None si algo falla. No
+    depende del negocio: el token es el mismo para toda la cuenta de Meta,
+    sin importar qué número de la cuenta recibió el archivo."""
     token = os.getenv("WHATSAPP_TOKEN")
     headers = {"Authorization": f"Bearer {token}"}
     try:
@@ -96,10 +101,14 @@ def fetch_whatsapp_media(media_id: str) -> tuple[bytes, str] | None:
         return None
 
 
-def send_whatsapp_message(to: str, body: str) -> None:
+def send_whatsapp_message(business: dict, to: str, body: str) -> None:
+    """Manda el mensaje DESDE el número de WhatsApp de este negocio
+    específico — cada negocio dado de alta en la pestaña Clientes tiene su
+    propio phone_number_id, todos bajo la misma cuenta de Meta y el mismo
+    token, así que un solo despliegue puede mandar mensajes "como" varios
+    negocios distintos al mismo tiempo."""
     token = os.getenv("WHATSAPP_TOKEN")
-    phone_number_id = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
-    url = f"https://graph.facebook.com/{GRAPH_API_VERSION}/{phone_number_id}/messages"
+    url = f"https://graph.facebook.com/{GRAPH_API_VERSION}/{business['phone_number_id']}/messages"
 
     resp = requests.post(
         url,
@@ -114,18 +123,56 @@ def send_whatsapp_message(to: str, body: str) -> None:
     )
     if resp.status_code >= 400:
         log.error("Error enviando mensaje a WhatsApp: %s %s", resp.status_code, resp.text)
-        alert_daniel(f"Fallo al enviar mensaje a {to}: HTTP {resp.status_code} — {resp.text[:200]}")
-        log_event("error_envio")
+        alert_daniel(business, f"Fallo al enviar mensaje a {to}: HTTP {resp.status_code} — {resp.text[:200]}")
+        if business:
+            log_event(business["name"], "error_envio")
 
 
-def alert_daniel(message: str) -> None:
+def send_whatsapp_template(business: dict, to: str, template_name: str, params: list[str]) -> None:
+    """Manda un mensaje usando una plantilla pre-aprobada por Meta. A
+    diferencia de send_whatsapp_message (texto libre), esta SÍ funciona
+    aunque hayan pasado más de 24h desde el último mensaje de esa persona —
+    WhatsApp exige plantilla para que el negocio inicie una conversación
+    fuera de esa ventana, y rechaza el texto libre en ese caso. Se usa para
+    todo aviso que el bot manda por su cuenta (no como respuesta inmediata
+    a algo que la persona acaba de escribir)."""
+    token = os.getenv("WHATSAPP_TOKEN")
+    url = f"https://graph.facebook.com/{GRAPH_API_VERSION}/{business['phone_number_id']}/messages"
+
+    resp = requests.post(
+        url,
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "messaging_product": "whatsapp",
+            "to": to,
+            "type": "template",
+            "template": {
+                "name": template_name,
+                "language": {"code": "es_MX"},
+                "components": (
+                    [{"type": "body", "parameters": [{"type": "text", "text": p} for p in params]}]
+                    if params else []
+                ),
+            },
+        },
+        timeout=15,
+    )
+    if resp.status_code >= 400:
+        log.error("Error enviando plantilla '%s': %s %s", template_name, resp.status_code, resp.text)
+        alert_daniel(business, f"Fallo al enviar plantilla '{template_name}' a {to}: HTTP {resp.status_code} — {resp.text[:200]}")
+        log_event(business["name"], "error_envio")
+
+
+def alert_daniel(business: dict | None, message: str) -> None:
     """Manda la alerta por Telegram: canal independiente de WhatsApp/Meta,
-    para que siga funcionando aunque WhatsApp sea justo lo que está fallando."""
+    para que siga funcionando aunque WhatsApp sea justo lo que está
+    fallando. Se etiqueta con el nombre del negocio para poder distinguir
+    de cuál de varios clientes activos viene la alerta."""
     bot_token = os.getenv("TELEGRAM_ALERT_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_ALERT_CHAT_ID")
     if not bot_token or not chat_id:
         return
-    negocio = os.getenv("BUSINESS_NAME", "bot")
+    negocio = business["name"] if business else "número no registrado"
     try:
         requests.post(
             f"https://api.telegram.org/bot{bot_token}/sendMessage",
@@ -136,107 +183,76 @@ def alert_daniel(message: str) -> None:
         log.exception("No se pudo mandar la alerta por Telegram")
 
 
-def notify_owner_new_request(req: dict, folio: int | None, pending_count: int) -> None:
-    if not get_owner_number():
-        alert_daniel(
-            f"Se pidió una cita pero OWNER_PHONE_NUMBER no está configurado: {req}"
-        )
+def notify_owner_new_request(business: dict, req: dict, folio: int | None) -> None:
+    if not get_owner_number(business):
+        alert_daniel(business, f"Se pidió una cita pero este negocio no tiene teléfono del dueño configurado: {req}")
         return
 
-    folio_txt = f"#{folio}" if folio else "#?"
-    instrucciones = f"Contesta *{folio_txt} SI* para confirmar, *{folio_txt} NO* para rechazar, u otro horario."
-    if pending_count <= 1:
-        # Es la única pendiente — no hace falta que escriba el folio
-        instrucciones = "Contesta *SI* para confirmar, *NO* para rechazar, u otro horario."
-
-    hechos = (
-        f"📅 Solicitud de cita {folio_txt}\n"
-        f"Nombre: {req['nombre']}\n"
-        f"Servicio: {req['servicio']}\n"
-        f"Horario pedido: {req['horario']}"
-    )
-    notify_staff(f"{hechos}\n\n{instrucciones}", hechos)
+    params = [str(folio) if folio else "?", req["nombre"], req["servicio"], req["horario"]]
+    notify_staff(business, "cita_nueva_solicitud", params, "cita_nueva_informativa", params)
 
 
-def notify_owner_cancellation(cita: dict) -> None:
-    if not get_owner_number():
+def notify_owner_cancellation(business: dict, cita: dict) -> None:
+    if not get_owner_number(business):
         return
-    hechos = (
-        f"❌ Folio #{cita['folio']} cancelada por el cliente\n"
-        f"Nombre: {cita['nombre']}\n"
-        f"Servicio: {cita['servicio']}\n"
-        f"Horario: {cita['horario']}"
-    )
-    notify_staff(hechos, hechos)
+    params = [str(cita["folio"]), cita["nombre"], cita["servicio"], cita["horario"]]
+    notify_staff(business, "cita_cancelada", params, "cita_cancelada", params)
 
 
-def notify_owner_modification(cita: dict, nuevo_horario: str, pending_count: int) -> None:
-    if not get_owner_number():
-        alert_daniel(
-            f"Se pidió mover el folio #{cita['folio']} pero OWNER_PHONE_NUMBER "
-            f"no está configurado."
-        )
+def notify_owner_modification(business: dict, cita: dict, nuevo_horario: str) -> None:
+    if not get_owner_number(business):
+        alert_daniel(business, f"Se pidió mover el folio #{cita['folio']} pero este negocio no tiene teléfono del dueño configurado.")
         return
 
-    folio_txt = f"#{cita['folio']}"
-    instrucciones = f"Contesta *{folio_txt} SI* para confirmar, *{folio_txt} NO* para rechazar, u otro horario."
-    if pending_count <= 1:
-        instrucciones = "Contesta *SI* para confirmar, *NO* para rechazar, u otro horario."
-
-    hechos = (
-        f"🔄 Folio {folio_txt} — cambio de horario solicitado\n"
-        f"Nombre: {cita['nombre']}\n"
-        f"Servicio: {cita['servicio']}\n"
-        f"Horario anterior: {cita['horario']}\n"
-        f"Horario nuevo pedido: {nuevo_horario}"
-    )
-    notify_staff(f"{hechos}\n\n{instrucciones}", hechos)
+    params = [str(cita["folio"]), cita["nombre"], cita["servicio"], cita["horario"], nuevo_horario]
+    notify_staff(business, "cita_cambio_solicitado", params, "cita_cambio_informativa", params)
 
 
-def _resolve_citas_reply(req: dict, reply_text: str) -> None:
+def _resolve_citas_reply(business: dict, req: dict, reply_text: str) -> None:
     """Aplica la respuesta del dueño (SI/NO/horario alternativo) a una
     solicitud de cita específica ya identificada sin ambigüedad."""
+    negocio = business["name"]
     reply_normalized = reply_text.strip().lower()
 
+    # Estos avisos van al CLIENTE, y el bot los inicia por su cuenta — el
+    # dueño pudo haber tardado horas en contestar, así que no se puede
+    # asumir que la ventana de 24h del cliente siga abierta. Por eso usan
+    # plantilla, no texto libre.
     if reply_normalized in ("si", "sí", "yes", "ok", "dale"):
-        send_whatsapp_message(
-            req["customer_wa_id"],
-            f"¡Confirmado! Tu cita para {req['servicio']} quedó agendada "
-            f"el {req['horario']}. Te esperamos 🙌",
+        send_whatsapp_template(
+            business, req["customer_wa_id"], "cita_confirmada_cliente",
+            [req["servicio"], req["horario"]],
         )
-        mark_appointment_resolved(req["row_number"], "confirmada")
-        log_event("cita_confirmada")
+        mark_appointment_resolved(negocio, req["row_number"], "confirmada")
+        log_event(negocio, "cita_confirmada")
     elif reply_normalized == "no":
-        send_whatsapp_message(
-            req["customer_wa_id"],
-            "Ese horario no está disponible. ¿Tienes otro horario que te "
-            "funcione? Escríbenos de nuevo para revisar otra opción.",
-        )
-        mark_appointment_resolved(req["row_number"], "rechazada")
-        log_event("cita_rechazada")
+        send_whatsapp_template(business, req["customer_wa_id"], "cita_rechazada_cliente", [])
+        mark_appointment_resolved(negocio, req["row_number"], "rechazada")
+        log_event(negocio, "cita_rechazada")
     else:
         # El dueño escribió un horario alternativo en texto libre
-        send_whatsapp_message(
-            req["customer_wa_id"],
-            f"Tu horario solicitado no estaba disponible, pero te "
-            f"proponemos: {reply_text}. ¿Te funciona?",
+        send_whatsapp_template(
+            business, req["customer_wa_id"], "cita_horario_alternativo_cliente",
+            [reply_text],
         )
-        mark_appointment_resolved(req["row_number"], f"horario_alternativo: {reply_text[:100]}")
+        mark_appointment_resolved(negocio, req["row_number"], f"horario_alternativo: {reply_text[:100]}")
 
 
-def _send_pending_list_prompt(owner: str, pending: list[dict]) -> None:
+def _send_pending_list_prompt(business: dict, owner: str, pending: list[dict]) -> None:
     lista = "\n".join(
         f"#{p['folio']} — {p['nombre']} ({p['servicio']}, {p['horario']})" for p in pending
     )
     send_whatsapp_message(
+        business,
         owner,
         f"Tienes {len(pending)} solicitudes de cita pendientes — dime a cuál te "
         f"refieres empezando tu respuesta con su folio, ej. '#{pending[0]['folio']} SI':\n\n{lista}",
     )
 
 
-def handle_owner_reply(text: str) -> None:
-    owner = get_owner_number()
+def handle_owner_reply(business: dict, text: str) -> None:
+    negocio = business["name"]
+    owner = get_owner_number(business)
     text = text.strip()
 
     # Formato estricto y explícito para referenciar un folio: '#3 SI'.
@@ -246,52 +262,54 @@ def handle_owner_reply(text: str) -> None:
     # eso: o el folio viene marcado sin ambigüedad, o no se adivina nada.
     folio_match = re.match(r"^#(\d+)\s+(.*)$", text)
     if folio_match:
-        req = get_pending_appointment_by_folio(int(folio_match.group(1)))
+        req = get_pending_appointment_by_folio(negocio, int(folio_match.group(1)))
         if not req:
             send_whatsapp_message(
+                business,
                 owner,
                 f"No encontré una solicitud pendiente con el folio #{folio_match.group(1)}. "
                 f"Revisa el número e intenta de nuevo.",
             )
             return
-        _resolve_citas_reply(req, folio_match.group(2).strip())
+        _resolve_citas_reply(business, req, folio_match.group(2).strip())
         return
 
-    pending = list_pending_appointments()
+    pending = list_pending_appointments(negocio)
     is_exact_reply = text.lower() in ("si", "sí", "yes", "ok", "dale", "no")
 
     if pending and len(pending) == 1 and is_exact_reply:
         # Único caso simple e inequívoco sin necesitar folio ni Claude.
-        _resolve_citas_reply(pending[0], text)
+        _resolve_citas_reply(business, pending[0], text)
         return
 
     if pending and len(pending) > 1 and is_exact_reply:
         # SI/NO sin folio con varias pendientes — no se adivina cuál.
-        _send_pending_list_prompt(owner, pending)
+        _send_pending_list_prompt(business, owner, pending)
         return
 
     # Aquí el texto no es un SI/NO limpio (o no hay nada pendiente) — es
     # ambiguo entre "propuesta de horario para la única pendiente" y "aviso
     # de negocio" (cierre, cambio de horario). No se asume, se le pregunta
     # a Claude qué es en realidad.
-    aviso = interpret_owner_instruction(text)
+    aviso = interpret_owner_instruction(negocio, text)
     if aviso:
-        save_business_notice(aviso)
-        send_whatsapp_message(owner, f'Anotado — les voy a avisar a los clientes: "{aviso}"')
-        log_event("aviso_negocio_actualizado")
+        save_business_notice(business["phone_number_id"], aviso)
+        send_whatsapp_message(business, owner, f'Anotado — les voy a avisar a los clientes: "{aviso}"')
+        log_event(negocio, "aviso_negocio_actualizado")
         return
 
     if not pending:
         send_whatsapp_message(
+            business,
             owner,
             "No tengo ninguna solicitud de cita pendiente ahora mismo. "
             "Si quieres avisar de un cierre especial o cambio de horario, "
             "dime algo como 'mañana cerraremos' o 'el jueves cerramos a las 2pm'.",
         )
     elif len(pending) == 1:
-        _resolve_citas_reply(pending[0], text)
+        _resolve_citas_reply(business, pending[0], text)
     else:
-        _send_pending_list_prompt(owner, pending)
+        _send_pending_list_prompt(business, owner, pending)
 
 
 @app.get("/webhook")
@@ -324,6 +342,7 @@ def receive_message():
         wa_id = normalize_mx_number(incoming["from"])
         msg_type = incoming.get("type", "text")
         message_id = incoming.get("id", "")
+        phone_number_id = change_value["metadata"]["phone_number_id"]
     except (KeyError, IndexError):
         log.warning("Payload de webhook con formato inesperado: %s", payload)
         return "OK", 200
@@ -332,11 +351,21 @@ def receive_message():
         log.info("Mensaje %s duplicado (reintento de Meta), ignorado.", message_id)
         return "OK", 200
 
-    log.info("Mensaje de %s (tipo: %s)", wa_id, msg_type)
+    business = get_business_config(phone_number_id)
+    if not business:
+        # El número que recibió el mensaje no está dado de alta en la
+        # pestaña Clientes (o está marcado inactivo) — no hay a quién
+        # avisarle ni dónde guardar nada, así que solo se registra la alerta
+        # y se ignora el mensaje, en vez de tronar.
+        log.warning("Mensaje a phone_number_id %s sin negocio dado de alta.", phone_number_id)
+        alert_daniel(None, f"Llegó un mensaje de {wa_id} a un número sin negocio dado de alta (phone_number_id={phone_number_id}).")
+        return "OK", 200
 
-    owner = get_owner_number()
+    log.info("Mensaje de %s (tipo: %s) para %s", wa_id, msg_type, business["name"])
+
+    owner = get_owner_number(business)
     if owner and wa_id == owner:
-        handle_owner_reply(incoming.get("text", {}).get("body", ""))
+        handle_owner_reply(business, incoming.get("text", {}).get("body", ""))
         return "OK", 200
 
     stored_content = None  # si se define, es lo que se guarda en el historial en vez de user_content
@@ -347,7 +376,7 @@ def receive_message():
     elif msg_type == "image":
         media = fetch_whatsapp_media(incoming["image"]["id"])
         if not media:
-            send_whatsapp_message(wa_id, "No pude abrir tu foto, ¿me la puedes describir por texto?")
+            send_whatsapp_message(business, wa_id, "No pude abrir tu foto, ¿me la puedes describir por texto?")
             return "OK", 200
         image_bytes, mime_type = media
         caption = incoming["image"].get("caption", "")
@@ -369,53 +398,54 @@ def receive_message():
 
     else:
         send_whatsapp_message(
+            business,
             wa_id,
             "Por ahora solo puedo leer mensajes de texto o fotos — ¿me lo escribes? 🙏",
         )
-        log_event("mensaje_no_soportado")
+        log_event(business["name"], "mensaje_no_soportado")
         return "OK", 200
 
     reply, action, hallucination_detected = ask_agent(
-        wa_id, user_content, stored_message=stored_content
+        business, wa_id, user_content, stored_message=stored_content
     )
-    send_whatsapp_message(wa_id, reply)
-    log_event("mensaje_respondido")
+    send_whatsapp_message(business, wa_id, reply)
+    log_event(business["name"], "mensaje_respondido")
 
     if hallucination_detected:
         alert_daniel(
+            business,
             f"El bot casi confirma una acción falsa de cita a {wa_id} sin "
             f"usar la herramienta real — se bloqueó automáticamente, pero "
             f"revisa el prompt, esto no debería pasar."
         )
-        log_event("alucinacion_detectada")
+        log_event(business["name"], "alucinacion_detectada")
 
     if action and action["type"] == "crear":
-        folio = add_pending_appointment(wa_id, action)
+        folio = add_pending_appointment(business["name"], wa_id, action)
         action["customer_wa_id"] = wa_id
-        pending_count = count_pending_appointments()
-        notify_owner_new_request(action, folio, pending_count)
-        log_event("cita_solicitada")
+        notify_owner_new_request(business, action, folio)
+        log_event(business["name"], "cita_solicitada")
 
     elif action and action["type"] in ("cancelar", "modificar"):
         # Verificación de seguridad: el folio debe pertenecer a QUIEN
         # escribió, sin importar lo que haya dicho Claude — nunca se confía
         # ciegamente en que el modelo eligió el folio correcto.
-        cita = get_appointment_by_folio(action["folio"])
+        cita = get_appointment_by_folio(business["name"], action["folio"])
         if not cita or cita["customer_wa_id"] != wa_id:
             alert_daniel(
+                business,
                 f"{wa_id} intentó {action['type']} el folio #{action['folio']}, "
                 f"que no existe o no le pertenece — bloqueado."
             )
         elif action["type"] == "cancelar":
-            mark_appointment_resolved(cita["row_number"], "cancelada_por_cliente")
-            notify_owner_cancellation(cita)
-            log_event("cita_cancelada")
+            mark_appointment_resolved(business["name"], cita["row_number"], "cancelada_por_cliente")
+            notify_owner_cancellation(business, cita)
+            log_event(business["name"], "cita_cancelada")
         else:  # modificar
-            update_appointment_horario(cita["row_number"], action["nuevo_horario"])
-            mark_appointment_resolved(cita["row_number"], "pendiente")  # requiere reconfirmar
-            pending_count = count_pending_appointments()
-            notify_owner_modification(cita, action["nuevo_horario"], pending_count)
-            log_event("cita_modificada")
+            update_appointment_horario(business["name"], cita["row_number"], action["nuevo_horario"])
+            mark_appointment_resolved(business["name"], cita["row_number"], "pendiente")  # requiere reconfirmar
+            notify_owner_modification(business, cita, action["nuevo_horario"])
+            log_event(business["name"], "cita_modificada")
 
     return "OK", 200
 
