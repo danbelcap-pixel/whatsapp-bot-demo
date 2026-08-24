@@ -1,4 +1,6 @@
 import base64
+import hashlib
+import hmac
 import logging
 import os
 import re
@@ -312,6 +314,24 @@ def handle_owner_reply(business: dict, text: str) -> None:
         _send_pending_list_prompt(business, owner, pending)
 
 
+def _verify_webhook_signature(payload_body: bytes, signature_header: str | None) -> bool:
+    """Verifica la firma X-Hub-Signature-256 que Meta manda en cada POST real
+    al webhook, calculada con el App Secret sobre el cuerpo crudo del
+    request. Sin esto, cualquiera que descubra la URL del webhook podría
+    mandar mensajes falsos (haciéndose pasar por el dueño o por un cliente)
+    sin pasar por WhatsApp para nada — por eso se rechaza de plano cualquier
+    request sin firma válida, en vez de solo registrar una advertencia."""
+    app_secret = os.getenv("WHATSAPP_APP_SECRET")
+    if not app_secret:
+        log.error("WHATSAPP_APP_SECRET no configurado: no se puede verificar la firma del webhook, se rechaza por seguridad.")
+        return False
+    if not signature_header or not signature_header.startswith("sha256="):
+        return False
+    expected = hmac.new(app_secret.encode(), payload_body, hashlib.sha256).hexdigest()
+    received = signature_header[len("sha256="):]
+    return hmac.compare_digest(expected, received)
+
+
 @app.get("/webhook")
 def verify_webhook():
     mode = request.args.get("hub.mode")
@@ -319,7 +339,7 @@ def verify_webhook():
     challenge = request.args.get("hub.challenge")
 
     expected_token = os.getenv("WHATSAPP_VERIFY_TOKEN")
-    if mode == "subscribe" and token == expected_token:
+    if mode == "subscribe" and expected_token and token and hmac.compare_digest(token, expected_token):
         log.info("Webhook verificado por Meta.")
         return challenge, 200
 
@@ -329,6 +349,10 @@ def verify_webhook():
 
 @app.post("/webhook")
 def receive_message():
+    if not _verify_webhook_signature(request.get_data(), request.headers.get("X-Hub-Signature-256")):
+        log.warning("Firma de webhook inválida o ausente — request rechazado (posible intento de suplantación).")
+        return "Forbidden", 403
+
     payload = request.get_json(silent=True) or {}
 
     try:
