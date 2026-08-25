@@ -159,21 +159,43 @@ def interpret_owner_instruction(negocio: str, text: str) -> str | None:
     return tool_block["input"]["aviso"] if tool_block else None
 
 
-def _system_prompt(negocio: str, info_negocio: str, citas_activas: list[dict], aviso_negocio: str | None) -> str:
+def _system_prompt(
+    negocio: str,
+    info_negocio: str,
+    citas_activas: list[dict],
+    aviso_negocio: str | None,
+    tono: str = "",
+    objetivo: str = "",
+    permite_citas: bool = True,
+) -> str:
     info_texto = (
         f"\nINFORMACIÓN DE ESTE NEGOCIO — úsala para contestar preguntas de "
         f"horarios, precios y servicios, es la fuente de verdad:\n{info_negocio}\n"
         if info_negocio else ""
     )
 
-    if citas_activas:
-        lineas = "\n".join(
-            f"- Folio #{c['folio']}: {c['servicio']}, {c['horario']} (estado: {c['estado']})"
-            for c in citas_activas
-        )
-        citas_texto = f"CITAS ACTIVAS DE ESTE CLIENTE AHORA MISMO:\n{lineas}"
+    tono_texto = (
+        f"\nTONO Y ESTILO QUE DEBES USAR CON ESTE NEGOCIO: {tono}\n"
+        if tono else ""
+    )
+
+    objetivo_texto = (
+        f"\nPRIORIDAD DE ESTE NEGOCIO — lo más importante para este dueño: "
+        f"{objetivo}\n"
+        if objetivo else ""
+    )
+
+    if permite_citas:
+        if citas_activas:
+            lineas = "\n".join(
+                f"- Folio #{c['folio']}: {c['servicio']}, {c['horario']} (estado: {c['estado']})"
+                for c in citas_activas
+            )
+            citas_texto = f"CITAS ACTIVAS DE ESTE CLIENTE AHORA MISMO:\n{lineas}"
+        else:
+            citas_texto = "Este cliente no tiene ninguna cita activa registrada todavía."
     else:
-        citas_texto = "Este cliente no tiene ninguna cita activa registrada todavía."
+        citas_texto = ""
 
     aviso_texto = (
         f"\nAVISO ESPECIAL VIGENTE — menciónalo si el cliente pregunta por "
@@ -181,20 +203,8 @@ def _system_prompt(negocio: str, info_negocio: str, citas_activas: list[dict], a
         if aviso_negocio else ""
     )
 
-    return f"""\
-Eres el asistente de atención al cliente por WhatsApp de {negocio}.
-
-Responde dudas de clientes de forma breve, cálida y directa, como lo haría
-un empleado que conoce bien el negocio. Nunca inventes precios, horarios o
-datos que no tengas — si no sabes algo, dilo y ofrece tomar el dato de
-contacto para que alguien del negocio confirme.
-{info_texto}
-{aviso_texto}
-{citas_texto}
-
-LO QUE SÍ PUEDES HACER (lo único real):
-- Responder preguntas 24/7 sobre este negocio (horarios, ubicación,
-  servicios, precios) usando la información que se te haya dado.
+    if permite_citas:
+        capacidades_citas = """\
 - Tomar solicitudes de cita NUEVA: si el cliente quiere agendar, pídele
   nombre, servicio y horario preferido. En cuanto tengas los tres datos, tu
   ÚNICA acción posible es usar la herramienta "solicitar_cita".
@@ -215,7 +225,33 @@ usas ninguna herramienta, no digas que hiciste ninguna acción.
 Usar una herramienta NO confirma nada todavía — el negocio tiene que
 aprobar el cambio primero, así que el mensaje correcto después de usar una
 herramienta es que estás confirmando con el negocio y en breve avisas
-(nunca digas "confirmado" hasta que el sistema te lo indique más adelante).
+(nunca digas "confirmado" hasta que el sistema te lo indique más adelante).\
+"""
+    else:
+        capacidades_citas = (
+            "- Este negocio NO usa el sistema de citas del bot. Si un cliente "
+            "pide agendar algo, no ofrezcas tomarle la solicitud ni inventes "
+            "que puedes hacerlo — explícale amablemente cómo puede contactar "
+            "directamente al negocio para eso."
+        )
+
+    return f"""\
+Eres el asistente de atención al cliente por WhatsApp de {negocio}.
+
+Responde dudas de clientes de forma breve, cálida y directa, como lo haría
+un empleado que conoce bien el negocio. Nunca inventes precios, horarios o
+datos que no tengas — si no sabes algo, dilo y ofrece tomar el dato de
+contacto para que alguien del negocio confirme.
+{info_texto}
+{tono_texto}
+{objetivo_texto}
+{aviso_texto}
+{citas_texto}
+
+LO QUE SÍ PUEDES HACER (lo único real):
+- Responder preguntas 24/7 sobre este negocio (horarios, ubicación,
+  servicios, precios) usando la información que se te haya dado.
+{capacidades_citas}
 
 LO QUE NO PUEDES HACER, aunque te lo pregunten — sé honesto, nunca digas que
 sí puedes: no puedes tomar pedidos de productos ni registrarlos en ningún
@@ -275,21 +311,28 @@ def _call_claude(
     history: list[dict],
     citas_activas: list[dict],
     aviso_negocio: str | None,
+    tono: str = "",
+    objetivo: str = "",
+    permite_citas: bool = True,
     force_any_tool: bool = False,
 ) -> tuple[list[dict], str, dict | None]:
     """Llama a Claude y devuelve (content_serializable, texto, tool_use_block)."""
+    tools = ALL_TOOLS if permite_citas else []
     message = get_client().messages.create(
         model=MODEL,
         max_tokens=MAX_TOKENS,
         system=[
             {
                 "type": "text",
-                "text": _system_prompt(negocio, info_negocio, citas_activas, aviso_negocio),
+                "text": _system_prompt(
+                    negocio, info_negocio, citas_activas, aviso_negocio,
+                    tono=tono, objetivo=objetivo, permite_citas=permite_citas,
+                ),
                 "cache_control": {"type": "ephemeral"},
             }
         ],
-        tools=ALL_TOOLS,
-        tool_choice=({"type": "any"} if force_any_tool else {"type": "auto"}),
+        tools=tools,
+        tool_choice=({"type": "any"} if force_any_tool and tools else {"type": "auto"}),
         messages=history,
     )
     # .model_dump() convierte los bloques del SDK a dicts planos, para poder
@@ -335,24 +378,33 @@ def ask_agent(
     business_id = business["phone_number_id"]
     negocio = business["name"]
     info_negocio = business.get("info", "")
-    citas_activas = get_customer_active_appointments(negocio, wa_id)
+    tono = business.get("tono", "")
+    objetivo = business.get("objetivo", "")
+    permite_citas = business.get("agenda_citas", True)
+    citas_activas = get_customer_active_appointments(negocio, wa_id) if permite_citas else []
     aviso_negocio = get_business_notice(business_id)
 
     history = _load_history(business_id, wa_id)
     user_index = len(history)
     history.append({"role": "user", "content": user_message})
 
-    content, text, tool_block = _call_claude(negocio, info_negocio, history, citas_activas, aviso_negocio)
+    content, text, tool_block = _call_claude(
+        negocio, info_negocio, history, citas_activas, aviso_negocio,
+        tono=tono, objetivo=objetivo, permite_citas=permite_citas,
+    )
     history.append({"role": "assistant", "content": content})
 
     hallucination_detected = False
-    if not tool_block and _looks_like_fake_confirmation(text):
+    if permite_citas and not tool_block and _looks_like_fake_confirmation(text):
         # Claude actuó como si ya hubiera hecho algo pero no usó ninguna
         # herramienta — en vez de hacer que el cliente repita todo, se lo
-        # forzamos en un segundo intento antes de rendirnos.
+        # forzamos en un segundo intento antes de rendirnos. Solo aplica si
+        # este negocio usa citas — si no, no hay ninguna herramienta de citas
+        # que forzar.
         hallucination_detected = True
         retry_content, _, retry_tool_block = _call_claude(
-            negocio, info_negocio, history[:-1], citas_activas, aviso_negocio, force_any_tool=True
+            negocio, info_negocio, history[:-1], citas_activas, aviso_negocio,
+            tono=tono, objetivo=objetivo, permite_citas=permite_citas, force_any_tool=True,
         )
         if retry_tool_block:
             content, tool_block = retry_content, retry_tool_block

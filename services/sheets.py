@@ -47,6 +47,7 @@ CLIENTES_TAB = "Clientes"
 CLIENTES_HEADERS = [
     "Phone Number ID", "Nombre del negocio", "Teléfono del dueño",
     "Teléfonos adicionales", "Activo", "Información del negocio",
+    "Tono del bot", "Objetivo del bot", "Agenda citas",
 ]
 
 
@@ -376,18 +377,24 @@ def get_business_config_row(phone_number_id: str) -> dict | None:
         return None
     try:
         _ensure_tab_exists(sheet_id, CLIENTES_TAB, CLIENTES_HEADERS)
-        rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:F")
+        rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:I")
         for row in rows:
             if len(row) >= 1 and row[0].strip() == phone_number_id:
                 activo = row[4].strip().upper() if len(row) > 4 else "SI"
                 if activo not in ("SI", "SÍ", "YES", "TRUE", "1"):
                     return None
+                agenda_citas = row[8].strip().upper() if len(row) > 8 else "SI"
                 return {
                     "phone_number_id": row[0].strip(),
                     "name": row[1].strip() if len(row) > 1 else "",
                     "owner_phone": row[2].strip() if len(row) > 2 else "",
                     "notify_also": row[3].strip() if len(row) > 3 else "",
                     "info": row[5].strip() if len(row) > 5 else "",
+                    "tono": row[6].strip() if len(row) > 6 else "",
+                    "objetivo": row[7].strip() if len(row) > 7 else "",
+                    # Vacío/"SI" = usa citas (compatible con clientes ya
+                    # dados de alta antes de que esta columna existiera).
+                    "agenda_citas": agenda_citas not in ("NO", "FALSE", "0"),
                 }
         return None
     except Exception:
