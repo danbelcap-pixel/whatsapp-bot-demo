@@ -98,7 +98,7 @@ def fetch_whatsapp_media(media_id: str) -> tuple[bytes, str] | None:
         file_resp = requests.get(meta["url"], headers=headers, timeout=20)
         file_resp.raise_for_status()
         return file_resp.content, meta.get("mime_type", "image/jpeg")
-    except requests.RequestException:
+    except (requests.RequestException, KeyError):
         log.exception("No se pudo descargar el archivo multimedia %s", media_id)
         return None
 
@@ -112,17 +112,25 @@ def send_whatsapp_message(business: dict, to: str, body: str) -> None:
     token = os.getenv("WHATSAPP_TOKEN")
     url = f"https://graph.facebook.com/{GRAPH_API_VERSION}/{business['phone_number_id']}/messages"
 
-    resp = requests.post(
-        url,
-        headers={"Authorization": f"Bearer {token}"},
-        json={
-            "messaging_product": "whatsapp",
-            "to": to,
-            "type": "text",
-            "text": {"body": body},
-        },
-        timeout=15,
-    )
+    try:
+        resp = requests.post(
+            url,
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "messaging_product": "whatsapp",
+                "to": to,
+                "type": "text",
+                "text": {"body": body},
+            },
+            timeout=15,
+        )
+    except requests.RequestException as exc:
+        log.exception("Fallo de red enviando mensaje a WhatsApp")
+        alert_daniel(business, f"Fallo de red al enviar mensaje a {to}: {exc}")
+        if business:
+            log_event(business["name"], "error_envio")
+        return
+
     if resp.status_code >= 400:
         log.error("Error enviando mensaje a WhatsApp: %s %s", resp.status_code, resp.text)
         alert_daniel(business, f"Fallo al enviar mensaje a {to}: HTTP {resp.status_code} — {resp.text[:200]}")
@@ -141,24 +149,31 @@ def send_whatsapp_template(business: dict, to: str, template_name: str, params: 
     token = os.getenv("WHATSAPP_TOKEN")
     url = f"https://graph.facebook.com/{GRAPH_API_VERSION}/{business['phone_number_id']}/messages"
 
-    resp = requests.post(
-        url,
-        headers={"Authorization": f"Bearer {token}"},
-        json={
-            "messaging_product": "whatsapp",
-            "to": to,
-            "type": "template",
-            "template": {
-                "name": template_name,
-                "language": {"code": "es_MX"},
-                "components": (
-                    [{"type": "body", "parameters": [{"type": "text", "text": p} for p in params]}]
-                    if params else []
-                ),
+    try:
+        resp = requests.post(
+            url,
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "messaging_product": "whatsapp",
+                "to": to,
+                "type": "template",
+                "template": {
+                    "name": template_name,
+                    "language": {"code": "es_MX"},
+                    "components": (
+                        [{"type": "body", "parameters": [{"type": "text", "text": p} for p in params]}]
+                        if params else []
+                    ),
+                },
             },
-        },
-        timeout=15,
-    )
+            timeout=15,
+        )
+    except requests.RequestException as exc:
+        log.exception("Fallo de red enviando plantilla '%s'", template_name)
+        alert_daniel(business, f"Fallo de red al enviar plantilla '{template_name}' a {to}: {exc}")
+        log_event(business["name"], "error_envio")
+        return
+
     if resp.status_code >= 400:
         log.error("Error enviando plantilla '%s': %s %s", template_name, resp.status_code, resp.text)
         alert_daniel(business, f"Fallo al enviar plantilla '{template_name}' a {to}: HTTP {resp.status_code} — {resp.text[:200]}")
@@ -429,9 +444,20 @@ def receive_message():
         log_event(business["name"], "mensaje_no_soportado")
         return "OK", 200
 
-    reply, action, hallucination_detected = ask_agent(
-        business, wa_id, user_content, stored_message=stored_content
-    )
+    try:
+        reply, action, hallucination_detected = ask_agent(
+            business, wa_id, user_content, stored_message=stored_content
+        )
+    except Exception as exc:
+        log.exception("Fallo llamando a Claude para %s", wa_id)
+        alert_daniel(business, f"Falló la llamada a Claude respondiéndole a {wa_id}: {exc}")
+        send_whatsapp_message(
+            business, wa_id,
+            "Ando teniendo un problema técnico ahora mismo — dame un momento e intenta de nuevo, por favor 🙏",
+        )
+        log_event(business["name"], "error_envio")
+        return "OK", 200
+
     send_whatsapp_message(business, wa_id, reply)
     log_event(business["name"], "mensaje_respondido")
 

@@ -248,16 +248,24 @@ citas 24/7 para negocios reales."""
 
 
 def _trim(history: list[dict]) -> list[dict]:
+    """La API de Claude exige que la conversación siempre empiece con un
+    mensaje "user" real (no un tool_result huérfano ni un mensaje del
+    asistente) — si el corte cae a la mitad de un turno, se sigue quitando
+    del inicio hasta encontrar un mensaje "user" que no sea solo un
+    tool_result, sin importar cuántos mensajes haga falta quitar."""
     if len(history) <= MAX_HISTORY_MESSAGES:
         return history
     trimmed = history[-MAX_HISTORY_MESSAGES:]
-    # Evita dejar un tool_result huérfano al inicio si el corte cayó
-    # justo a la mitad de un par tool_use/tool_result
-    first_content = trimmed[0].get("content") if trimmed else None
-    if isinstance(first_content, list) and any(
-        isinstance(c, dict) and c.get("type") == "tool_result" for c in first_content
-    ):
-        trimmed = trimmed[1:]
+    while trimmed:
+        first = trimmed[0]
+        content = first.get("content")
+        is_tool_result_only = isinstance(content, list) and any(
+            isinstance(c, dict) and c.get("type") == "tool_result" for c in content
+        )
+        if first.get("role") == "assistant" or is_tool_result_only:
+            trimmed = trimmed[1:]
+        else:
+            break
     return trimmed
 
 
