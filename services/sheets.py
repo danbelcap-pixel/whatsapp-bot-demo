@@ -278,25 +278,6 @@ def get_pending_appointment_by_folio(business_name: str, folio: int) -> dict | N
         return None
 
 
-def get_oldest_pending_appointment(business_name: str) -> dict | None:
-    """Devuelve la solicitud de cita 'pendiente' más antigua (fallback
-    cuando el dueño no especifica un folio)."""
-    sheet_id = os.getenv("GOOGLE_SHEET_ID")
-    if not sheet_id:
-        return None
-    try:
-        tab = _citas_tab_name(business_name)
-        _ensure_tab_exists(sheet_id, tab, CITAS_HEADERS)
-        rows = _values_get(sheet_id, f"'{tab}'!A2:G")
-        for i, row in enumerate(rows, start=2):
-            if len(row) >= 7 and row[6] == "pendiente":
-                return _row_to_appointment(row, i)
-        return None
-    except Exception:
-        log.exception("No se pudo leer las citas pendientes de Google Sheets")
-        return None
-
-
 def list_pending_appointments(business_name: str) -> list[dict]:
     """Devuelve TODAS las solicitudes pendientes (no solo la más antigua) —
     para mostrárselas completas al dueño cuando tiene que elegir cuál."""
@@ -315,20 +296,6 @@ def list_pending_appointments(business_name: str) -> list[dict]:
     except Exception:
         log.exception("No se pudo listar las citas pendientes de Google Sheets")
         return []
-
-
-def count_pending_appointments(business_name: str) -> int:
-    sheet_id = os.getenv("GOOGLE_SHEET_ID")
-    if not sheet_id:
-        return 0
-    try:
-        tab = _citas_tab_name(business_name)
-        _ensure_tab_exists(sheet_id, tab, CITAS_HEADERS)
-        rows = _values_get(sheet_id, f"'{tab}'!A2:G")
-        return sum(1 for row in rows if len(row) >= 7 and row[6] == "pendiente")
-    except Exception:
-        log.exception("No se pudo contar las citas pendientes en Google Sheets")
-        return 0
 
 
 def get_customer_active_appointments(business_name: str, wa_id: str) -> list[dict]:
