@@ -105,6 +105,9 @@
   var closeBtn = panel.querySelector("#bsd-widget-close");
 
   var historyLoaded = false;
+  var renderedCount = 0; // cuántos mensajes del historial del servidor ya se muestran
+  var pollTimer = null;
+  var POLL_INTERVAL_MS = 4000;
 
   function appendMessage(role, text) {
     var div = document.createElement("div");
@@ -123,16 +126,52 @@
     fetch(url)
       .then(function (r) { return r.json(); })
       .then(function (data) {
-        (data.messages || []).forEach(function (m) {
+        var mensajes = data.messages || [];
+        mensajes.forEach(function (m) {
           appendMessage(m.role, m.text);
         });
-        if (!data.messages || data.messages.length === 0) {
+        renderedCount = mensajes.length;
+        if (mensajes.length === 0) {
           appendMessage("assistant", "¡Hola! 👋 ¿En qué te puedo ayudar?");
         }
       })
       .catch(function () {
         appendMessage("assistant", "¡Hola! 👋 ¿En qué te puedo ayudar?");
       });
+  }
+
+  function checkForUpdates() {
+    // Mientras el chat esté abierto, revisa cada pocos segundos si llegó
+    // algo nuevo al historial (por ejemplo, la respuesta del dueño del
+    // negocio aprobando/rechazando una cita) — así el cliente no tiene que
+    // cerrar y volver a abrir el chat para verla.
+    var url = apiBase + "/widget/history?widget_id=" + encodeURIComponent(widgetId) +
+      "&visitor_id=" + encodeURIComponent(visitorId);
+    fetch(url)
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        var mensajes = data.messages || [];
+        if (mensajes.length > renderedCount) {
+          mensajes.slice(renderedCount).forEach(function (m) {
+            appendMessage(m.role, m.text);
+          });
+          renderedCount = mensajes.length;
+        }
+      })
+      .catch(function () {
+        // Un fallo puntual de red al revisar no debe interrumpir nada —
+        // simplemente se vuelve a intentar en el siguiente ciclo.
+      });
+  }
+
+  function startPolling() {
+    if (pollTimer) return;
+    pollTimer = setInterval(checkForUpdates, POLL_INTERVAL_MS);
+  }
+
+  function stopPolling() {
+    clearInterval(pollTimer);
+    pollTimer = null;
   }
 
   function sendMessage() {
@@ -154,6 +193,10 @@
       .then(function (data) {
         typingEl.remove();
         appendMessage("assistant", data.reply || "No pude procesar tu mensaje, intenta de nuevo.");
+        // El servidor guardó exactamente 2 entradas visibles por este
+        // intercambio (el mensaje del cliente y la respuesta) — se suma
+        // aquí para que el siguiente sondeo no las vuelva a mostrar.
+        renderedCount += 2;
       })
       .catch(function () {
         typingEl.remove();
@@ -168,11 +211,15 @@
     panel.classList.toggle("open");
     if (panel.classList.contains("open")) {
       loadHistory();
+      startPolling();
       inputEl.focus();
+    } else {
+      stopPolling();
     }
   });
   closeBtn.addEventListener("click", function () {
     panel.classList.remove("open");
+    stopPolling();
   });
   sendBtn.addEventListener("click", sendMessage);
   inputEl.addEventListener("keydown", function (e) {
