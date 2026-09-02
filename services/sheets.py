@@ -48,6 +48,7 @@ CLIENTES_HEADERS = [
     "Phone Number ID", "Nombre del negocio", "Teléfono del dueño",
     "Teléfonos adicionales", "Activo", "Información del negocio",
     "Tono del bot", "Objetivo del bot", "Agenda citas", "Widget ID",
+    "Telegram Chat ID",
 ]
 
 
@@ -377,7 +378,7 @@ def get_business_config_row(phone_number_id: str) -> dict | None:
         return None
     try:
         _ensure_tab_exists(sheet_id, CLIENTES_TAB, CLIENTES_HEADERS)
-        rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:J")
+        rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:K")
         for row in rows:
             if len(row) >= 1 and row[0].strip() == phone_number_id:
                 activo = row[4].strip().upper() if len(row) > 4 else "SI"
@@ -399,6 +400,7 @@ def get_business_config_row(phone_number_id: str) -> dict | None:
                     # Vacío/"SI" = usa citas (compatible con clientes ya
                     # dados de alta antes de que esta columna existiera).
                     "agenda_citas": agenda_citas not in ("NO", "FALSE", "0"),
+                    "telegram_chat_id": row[10].strip() if len(row) > 10 else "",
                 }
         return None
     except Exception:
@@ -417,7 +419,7 @@ def get_business_config_by_widget_id(widget_id: str) -> dict | None:
         return None
     try:
         _ensure_tab_exists(sheet_id, CLIENTES_TAB, CLIENTES_HEADERS)
-        rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:J")
+        rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:K")
         for row in rows:
             if len(row) > 9 and row[9].strip() == widget_id:
                 activo = row[4].strip().upper() if len(row) > 4 else "SI"
@@ -435,8 +437,47 @@ def get_business_config_by_widget_id(widget_id: str) -> dict | None:
                     "objetivo": row[7].strip() if len(row) > 7 else "",
                     "agenda_citas": agenda_citas not in ("NO", "FALSE", "0"),
                     "widget_id": widget_id,
+                    "telegram_chat_id": row[10].strip() if len(row) > 10 else "",
                 }
         return None
     except Exception:
         log.exception("No se pudo leer la pestaña Clientes de Google Sheets (por widget_id)")
+        return None
+
+
+def get_business_config_by_telegram_chat_id(chat_id: str) -> dict | None:
+    """Como las anteriores, pero busca por 'Telegram Chat ID' (columna K) —
+    para resolver a qué negocio pertenece un mensaje que llega por el
+    webhook de Telegram (dueños de negocios sin WhatsApp propio reciben y
+    contestan avisos de citas por ahí en vez de por WhatsApp)."""
+    sheet_id = os.getenv("GOOGLE_SHEET_ID")
+    if not sheet_id or not chat_id:
+        return None
+    try:
+        _ensure_tab_exists(sheet_id, CLIENTES_TAB, CLIENTES_HEADERS)
+        rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:K")
+        for row in rows:
+            if len(row) > 10 and row[10].strip() == str(chat_id):
+                activo = row[4].strip().upper() if len(row) > 4 else "SI"
+                if activo not in ("SI", "SÍ", "YES", "TRUE", "1"):
+                    return None
+                agenda_citas = row[8].strip().upper() if len(row) > 8 else "SI"
+                phone_number_id = row[0].strip() if len(row) > 0 else ""
+                widget_id = row[9].strip() if len(row) > 9 else ""
+                return {
+                    "business_id": phone_number_id or f"widget:{widget_id}" or f"telegram:{chat_id}",
+                    "phone_number_id": phone_number_id,
+                    "name": row[1].strip() if len(row) > 1 else "",
+                    "owner_phone": row[2].strip() if len(row) > 2 else "",
+                    "notify_also": row[3].strip() if len(row) > 3 else "",
+                    "info": row[5].strip() if len(row) > 5 else "",
+                    "tono": row[6].strip() if len(row) > 6 else "",
+                    "objetivo": row[7].strip() if len(row) > 7 else "",
+                    "agenda_citas": agenda_citas not in ("NO", "FALSE", "0"),
+                    "widget_id": widget_id,
+                    "telegram_chat_id": str(chat_id),
+                }
+        return None
+    except Exception:
+        log.exception("No se pudo leer la pestaña Clientes de Google Sheets (por telegram_chat_id)")
         return None

@@ -1,9 +1,30 @@
 import logging
 
 from services.memory import get_cached_business_config, save_cached_business_config
-from services.sheets import get_business_config_by_widget_id, get_business_config_row
+from services.sheets import (
+    get_business_config_by_telegram_chat_id,
+    get_business_config_by_widget_id,
+    get_business_config_row,
+)
 
 log = logging.getLogger("whatsapp-bot")
+
+
+def get_business_config_by_telegram(chat_id: str) -> dict | None:
+    """Como get_business_config, pero resuelve el negocio dueño de un
+    mensaje de Telegram a partir del chat_id del dueño, para negocios que
+    reciben avisos de citas por ahí en vez de por WhatsApp."""
+    cache_key = f"telegram:{chat_id}"
+    cached = get_cached_business_config(cache_key)
+    if cached is not None:
+        return cached
+
+    config = get_business_config_by_telegram_chat_id(chat_id)
+    if config is None:
+        return None
+
+    save_cached_business_config(cache_key, config)
+    return config
 
 
 def get_business_config_by_widget(widget_id: str) -> dict | None:

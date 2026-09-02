@@ -10,7 +10,11 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 
 from agent.client import ask_agent, interpret_owner_instruction
-from services.business import get_business_config, get_business_config_by_widget
+from services.business import (
+    get_business_config,
+    get_business_config_by_telegram,
+    get_business_config_by_widget,
+)
 from services.memory import (
     check_widget_rate_limit,
     get_history,
@@ -71,19 +75,64 @@ def get_notify_also_numbers(business: dict) -> list[str]:
     return [normalize_mx_number(n.strip()) for n in raw.split(",") if n.strip()]
 
 
-def notify_staff(
-    business: dict,
-    owner_template: str, owner_params: list[str],
-    notify_template: str, notify_params: list[str],
-) -> None:
-    """Manda la plantilla con instrucciones de acción al dueño, y una
-    plantilla informativa (sin instrucciones, para no confundirlos con
-    acciones que no pueden tomar) a cualquier encargado adicional
-    configurado. Usa plantillas, no texto libre, porque este aviso lo
-    inicia el bot por su cuenta — no es respuesta a un mensaje reciente."""
+def _has_owner_contact(business: dict) -> bool:
+    """True si hay alguna forma de avisarle al dueño — por WhatsApp o por
+    Telegram (negocios que solo usan el widget de página web, sin WhatsApp
+    propio, avisan por Telegram)."""
+    return bool(get_owner_number(business)) or bool(business.get("telegram_chat_id"))
+
+
+def send_telegram_message(chat_id: str, text: str) -> bool:
+    """Manda un mensaje de Telegram usando el mismo bot de alertas de
+    Daniel — el dueño de un negocio solo tiene que iniciar una conversación
+    con ese bot una vez para poder recibir y contestar avisos de citas por
+    ahí. Devuelve True si se mandó bien."""
+    bot_token = os.getenv("TELEGRAM_ALERT_BOT_TOKEN")
+    if not bot_token or not chat_id:
+        return False
+    try:
+        resp = requests.post(
+            f"https://api.telegram.org/bot{bot_token}/sendMessage",
+            json={"chat_id": chat_id, "text": text},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return True
+    except requests.RequestException:
+        log.exception("No se pudo mandar el mensaje de Telegram a %s", chat_id)
+        return False
+
+
+def _reply_to_owner(business: dict, text: str) -> None:
+    """Le contesta directo al DUEÑO (confirmaciones tipo "anotado", o que no
+    se encontró un folio) — por el mismo canal donde recibe los avisos de
+    citas, Telegram o WhatsApp, sin importar por cuál llegó su mensaje."""
+    telegram_chat_id = business.get("telegram_chat_id")
+    if telegram_chat_id:
+        send_telegram_message(telegram_chat_id, text)
+        return
     owner = get_owner_number(business)
     if owner:
-        send_whatsapp_template(business, owner, owner_template, owner_params)
+        send_whatsapp_message(business, owner, text)
+
+
+def notify_staff(
+    business: dict,
+    owner_template: str, owner_params: list[str], owner_text: str,
+    notify_template: str, notify_params: list[str],
+) -> None:
+    """Manda el aviso de acción al dueño (plantilla de WhatsApp, o texto
+    libre por Telegram si el negocio no usa WhatsApp propio), y una
+    plantilla informativa (sin instrucciones, para no confundirlos con
+    acciones que no pueden tomar) a cualquier encargado adicional
+    configurado — esos siempre son números de WhatsApp, no Telegram."""
+    telegram_chat_id = business.get("telegram_chat_id")
+    if telegram_chat_id:
+        send_telegram_message(telegram_chat_id, owner_text)
+    else:
+        owner = get_owner_number(business)
+        if owner:
+            send_whatsapp_template(business, owner, owner_template, owner_params)
     for number in get_notify_also_numbers(business):
         send_whatsapp_template(business, number, notify_template, notify_params)
 
@@ -210,28 +259,45 @@ def alert_daniel(business: dict | None, message: str) -> None:
 
 
 def notify_owner_new_request(business: dict, req: dict, folio: int | None) -> None:
-    if not get_owner_number(business):
-        alert_daniel(business, f"Se pidió una cita pero este negocio no tiene teléfono del dueño configurado: {req}")
+    if not _has_owner_contact(business):
+        alert_daniel(business, f"Se pidió una cita pero este negocio no tiene forma de avisarle al dueño configurada: {req}")
         return
 
-    params = [str(folio) if folio else "?", req["nombre"], req["servicio"], req["horario"]]
-    notify_staff(business, "cita_nueva_solicitud", params, "cita_nueva_informativa", params)
+    folio_texto = str(folio) if folio else "?"
+    params = [folio_texto, req["nombre"], req["servicio"], req["horario"]]
+    owner_text = (
+        f"📅 Nueva solicitud de cita, folio {folio_texto}.\n"
+        f"Nombre: {req['nombre']}\nServicio: {req['servicio']}\nHorario pedido: {req['horario']}\n\n"
+        f"Responde SI para confirmar, NO para rechazar, o propone otro horario."
+    )
+    notify_staff(business, "cita_nueva_solicitud", params, owner_text, "cita_nueva_informativa", params)
 
 
 def notify_owner_cancellation(business: dict, cita: dict) -> None:
-    if not get_owner_number(business):
+    if not _has_owner_contact(business):
         return
     params = [str(cita["folio"]), cita["nombre"], cita["servicio"], cita["horario"]]
-    notify_staff(business, "cita_cancelada", params, "cita_cancelada", params)
+    owner_text = (
+        f"❌ Folio {cita['folio']} cancelada por el cliente.\n"
+        f"Nombre: {cita['nombre']}\nServicio: {cita['servicio']}\nHorario: {cita['horario']}.\n\n"
+        f"Esto es solo informativo."
+    )
+    notify_staff(business, "cita_cancelada", params, owner_text, "cita_cancelada", params)
 
 
 def notify_owner_modification(business: dict, cita: dict, nuevo_horario: str) -> None:
-    if not get_owner_number(business):
-        alert_daniel(business, f"Se pidió mover el folio #{cita['folio']} pero este negocio no tiene teléfono del dueño configurado.")
+    if not _has_owner_contact(business):
+        alert_daniel(business, f"Se pidió mover el folio #{cita['folio']} pero este negocio no tiene forma de avisarle al dueño configurada.")
         return
 
     params = [str(cita["folio"]), cita["nombre"], cita["servicio"], cita["horario"], nuevo_horario]
-    notify_staff(business, "cita_cambio_solicitado", params, "cita_cambio_informativa", params)
+    owner_text = (
+        f"🔄 Folio {cita['folio']}: cambio de horario solicitado.\n"
+        f"Nombre: {cita['nombre']}\nServicio: {cita['servicio']}\n"
+        f"Horario anterior: {cita['horario']}\nHorario nuevo pedido: {nuevo_horario}\n\n"
+        f"Responde SI para confirmar, NO para rechazar, o propone otro horario."
+    )
+    notify_staff(business, "cita_cambio_solicitado", params, owner_text, "cita_cambio_informativa", params)
 
 
 def _notify_customer(
@@ -289,13 +355,12 @@ def _resolve_citas_reply(business: dict, req: dict, reply_text: str) -> None:
         mark_appointment_resolved(negocio, req["row_number"], f"horario_alternativo: {reply_text[:100]}")
 
 
-def _send_pending_list_prompt(business: dict, owner: str, pending: list[dict]) -> None:
+def _send_pending_list_prompt(business: dict, pending: list[dict]) -> None:
     lista = "\n".join(
         f"#{p['folio']} — {p['nombre']} ({p['servicio']}, {p['horario']})" for p in pending
     )
-    send_whatsapp_message(
+    _reply_to_owner(
         business,
-        owner,
         f"Tienes {len(pending)} solicitudes de cita pendientes — dime a cuál te "
         f"refieres empezando tu respuesta con su folio, ej. '#{pending[0]['folio']} SI':\n\n{lista}",
     )
@@ -303,7 +368,6 @@ def _send_pending_list_prompt(business: dict, owner: str, pending: list[dict]) -
 
 def handle_owner_reply(business: dict, text: str) -> None:
     negocio = business["name"]
-    owner = get_owner_number(business)
     text = text.strip()
 
     # Formato estricto y explícito para referenciar un folio: '#3 SI'.
@@ -315,9 +379,8 @@ def handle_owner_reply(business: dict, text: str) -> None:
     if folio_match:
         req = get_pending_appointment_by_folio(negocio, int(folio_match.group(1)))
         if not req:
-            send_whatsapp_message(
+            _reply_to_owner(
                 business,
-                owner,
                 f"No encontré una solicitud pendiente con el folio #{folio_match.group(1)}. "
                 f"Revisa el número e intenta de nuevo.",
             )
@@ -335,7 +398,7 @@ def handle_owner_reply(business: dict, text: str) -> None:
 
     if pending and len(pending) > 1 and is_exact_reply:
         # SI/NO sin folio con varias pendientes — no se adivina cuál.
-        _send_pending_list_prompt(business, owner, pending)
+        _send_pending_list_prompt(business, pending)
         return
 
     # Aquí el texto no es un SI/NO limpio (o no hay nada pendiente) — es
@@ -345,14 +408,13 @@ def handle_owner_reply(business: dict, text: str) -> None:
     aviso = interpret_owner_instruction(negocio, text)
     if aviso:
         save_business_notice(business["business_id"], aviso)
-        send_whatsapp_message(business, owner, f'Anotado — les voy a avisar a los clientes: "{aviso}"')
+        _reply_to_owner(business, f'Anotado — les voy a avisar a los clientes: "{aviso}"')
         log_event(negocio, "aviso_negocio_actualizado")
         return
 
     if not pending:
-        send_whatsapp_message(
+        _reply_to_owner(
             business,
-            owner,
             "No tengo ninguna solicitud de cita pendiente ahora mismo. "
             "Si quieres avisar de un cierre especial o cambio de horario, "
             "dime algo como 'mañana cerraremos' o 'el jueves cerramos a las 2pm'.",
@@ -639,6 +701,36 @@ def widget_history():
             mensajes.append({"role": turno.get("role"), "text": texto})
 
     return _widget_cors(jsonify({"messages": mensajes}))
+
+
+@app.post("/telegram-webhook")
+def telegram_webhook():
+    """Recibe las respuestas de dueños de negocios que usan Telegram en vez
+    de WhatsApp para aprobar/rechazar citas (típicamente negocios que solo
+    usan el widget de página web, sin número de WhatsApp propio)."""
+    expected_secret = os.getenv("TELEGRAM_WEBHOOK_SECRET")
+    received_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+    if not expected_secret or not hmac.compare_digest(received_secret, expected_secret):
+        log.warning("Firma de webhook de Telegram inválida o ausente — request rechazado.")
+        return "Forbidden", 403
+
+    payload = request.get_json(silent=True) or {}
+    message = payload.get("message") or {}
+    chat_id = message.get("chat", {}).get("id")
+    text = message.get("text", "")
+
+    if not chat_id or not text:
+        # Otros tipos de update (stickers, ediciones, etc.) — no hay nada
+        # que procesar, pero se contesta OK para que Telegram no reintente.
+        return "OK", 200
+
+    business = get_business_config_by_telegram(str(chat_id))
+    if not business:
+        log.warning("Mensaje de Telegram de chat_id %s sin negocio dado de alta.", chat_id)
+        return "OK", 200
+
+    handle_owner_reply(business, text)
+    return "OK", 200
 
 
 @app.get("/")
