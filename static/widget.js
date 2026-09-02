@@ -119,11 +119,16 @@
   }
 
   function loadHistory() {
-    if (historyLoaded) return;
+    // Devuelve una promesa para que quien la llame (ej. un botón de
+    // "Cotizar" que manda un mensaje automático) pueda esperar a que el
+    // historial ya esté renderizado antes de agregar nada más — si no, un
+    // mensaje automático podría aparecer ANTES que el historial viejo del
+    // visitante, dejando la conversación en desorden.
+    if (historyLoaded) return Promise.resolve();
     historyLoaded = true;
     var url = apiBase + "/widget/history?widget_id=" + encodeURIComponent(widgetId) +
       "&visitor_id=" + encodeURIComponent(visitorId);
-    fetch(url)
+    return fetch(url)
       .then(function (r) { return r.json(); })
       .then(function (data) {
         var mensajes = data.messages || [];
@@ -224,9 +229,9 @@
 
   function openPanel() {
     panel.classList.add("open");
-    loadHistory();
     startPolling();
     inputEl.focus();
+    return loadHistory();
   }
 
   bubble.addEventListener("click", function () {
@@ -240,11 +245,21 @@
 
   // Cualquier elemento de la página con este atributo abre el chat al
   // dársele clic — así el sitio puede tener botones propios invitando a
-  // "hablar con el asistente" en vez de depender solo de la burbuja.
+  // "hablar con el asistente" en vez de depender solo de la burbuja. Si
+  // además trae data-bsd-chat-message, ese texto se manda automáticamente
+  // en cuanto se abre (ej. un botón de "Cotizar" que ya manda "quiero
+  // cotizar" sin que la persona tenga que escribirlo) — se espera a que el
+  // historial viejo termine de cargar antes, para no desordenar el chat.
   document.querySelectorAll("[data-bsd-chat-trigger]").forEach(function (el) {
     el.addEventListener("click", function (e) {
       e.preventDefault();
-      openPanel();
+      var presetMessage = el.getAttribute("data-bsd-chat-message");
+      openPanel().then(function () {
+        if (presetMessage) {
+          inputEl.value = presetMessage;
+          sendMessage();
+        }
+      });
     });
   });
   closeBtn.addEventListener("click", function () {
