@@ -644,6 +644,35 @@ def _handle_agent_action(business: dict, wa_id: str, action: dict) -> None:
             notify_owner_modification(business, cita, action["nuevo_horario"])
             log_event(business["name"], "cita_modificada")
 
+    elif action["type"] == "lead":
+        _notify_new_lead(business, action)
+        log_event(business["name"], "lead_registrado")
+
+
+def _notify_new_lead(business: dict, lead: dict) -> None:
+    """Avisa de inmediato al dueño de alguien interesado en contratar — sin
+    aprobación de por medio, a diferencia de una cita: aquí no hay nada que
+    "resolver", solo se le avisa para que le hable lo antes posible."""
+    if not _has_owner_contact(business):
+        alert_daniel(business, f"Nuevo interesado pero este negocio no tiene forma de avisarle al dueño configurada: {lead}")
+        return
+
+    negocio_texto = f"\nNegocio: {lead['negocio_cliente']}" if lead.get("negocio_cliente") else ""
+    text = (
+        f"🟢 Nuevo interesado en contratar.\n"
+        f"Nombre: {lead['nombre']}{negocio_texto}\n"
+        f"Contacto: {lead['contacto']}\n"
+        f"Detalle: {lead['detalle']}\n\n"
+        f"Contáctalo lo antes posible."
+    )
+    telegram_chat_id = business.get("telegram_chat_id")
+    if telegram_chat_id:
+        send_telegram_message(telegram_chat_id, text)
+    else:
+        owner = get_owner_number(business)
+        if owner:
+            send_whatsapp_message(business, owner, text)
+
 
 def _widget_cors(response):
     """El widget se embebe en dominios de terceros (la página del cliente),

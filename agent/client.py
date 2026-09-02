@@ -118,6 +118,41 @@ RESCHEDULE_TOOL = {
 
 ALL_TOOLS = [BOOKING_TOOL, CANCEL_TOOL, RESCHEDULE_TOOL]
 
+LEAD_TOOL = {
+    "name": "registrar_interesado",
+    "description": (
+        "Registra a alguien interesado en CONTRATAR o COMPRAR el servicio de "
+        "este negocio — no una cita operativa como un corte de pelo o una "
+        "consulta (para eso usa solicitar_cita si está disponible). Úsala en "
+        "cuanto tengas su nombre y un dato de contacto, para que el negocio "
+        "le hable directamente lo antes posible. A diferencia de una cita, "
+        "aquí NO se necesita aprobar nada — se avisa de inmediato."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "nombre": {"type": "string", "description": "Nombre de la persona interesada"},
+            "negocio_cliente": {
+                "type": "string",
+                "description": "Nombre de su negocio, si aplica y si te lo dio",
+            },
+            "contacto": {
+                "type": "string",
+                "description": "Teléfono o correo donde se le puede contactar",
+            },
+            "detalle": {
+                "type": "string",
+                "description": "Qué le interesa contratar o qué necesita, en breve",
+            },
+        },
+        "required": ["nombre", "contacto", "detalle"],
+    },
+}
+
+# Se ofrece siempre, sin importar si el negocio usa citas — captar un
+# interesado en comprar no depende de que el negocio maneje horarios.
+LEAD_TOOLS = [LEAD_TOOL]
+
 ANNOUNCEMENT_TOOL = {
     "name": "actualizar_aviso_negocio",
     "description": (
@@ -286,6 +321,11 @@ emojis o saltos de línea si quieres organizar la idea.
 LO QUE SÍ PUEDES HACER (lo único real):
 - Responder preguntas 24/7 sobre este negocio (horarios, ubicación,
   servicios, precios) usando la información que se te haya dado.
+- Si alguien quiere CONTRATAR o COMPRAR el servicio de este negocio (no una
+  cita operativa), usa la herramienta "registrar_interesado" en cuanto
+  tengas su nombre y un dato de contacto — a diferencia de una cita, esto no
+  necesita aprobación, se avisa de inmediato para que le hablen lo antes
+  posible.
 {capacidades_citas}
 
 LO QUE NO PUEDES HACER, aunque te lo pregunten — sé honesto, nunca digas que
@@ -360,7 +400,7 @@ def _call_claude(
     force_any_tool: bool = False,
 ) -> tuple[list[dict], str, dict | None]:
     """Llama a Claude y devuelve (content_serializable, texto, tool_use_block)."""
-    tools = ALL_TOOLS if permite_citas else []
+    tools = (ALL_TOOLS if permite_citas else []) + LEAD_TOOLS
     message = get_client().messages.create(
         model=MODEL,
         max_tokens=MAX_TOKENS,
@@ -493,12 +533,22 @@ def ask_agent(
                 f"Entendido, voy a tramitar la cancelación de tu cita "
                 f"(folio #{inp['folio']}) con el negocio. Te confirmo en breve."
             )
-        else:  # modificar_cita
+        elif name == "modificar_cita":
             action = {"type": "modificar", "folio": inp["folio"], "nuevo_horario": inp["nuevo_horario"]}
             reply = (
                 f"Entendido, voy a pedirle al negocio que mueva tu cita "
                 f"(folio #{inp['folio']}) a {inp['nuevo_horario']}. Te aviso "
                 f"en cuanto lo confirmen."
+            )
+        else:  # registrar_interesado
+            action = {
+                "type": "lead", "nombre": inp["nombre"],
+                "negocio_cliente": inp.get("negocio_cliente", ""),
+                "contacto": inp["contacto"], "detalle": inp["detalle"],
+            }
+            reply = (
+                f"¡Perfecto, {inp['nombre']}! Ya tengo tus datos — en un "
+                f"momento te contactan directamente para avanzar. 🙌"
             )
     elif hallucination_detected:
         # Ni el intento normal ni el forzado lograron una herramienta real.

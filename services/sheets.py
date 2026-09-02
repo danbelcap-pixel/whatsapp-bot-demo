@@ -21,7 +21,7 @@ SUMMARY_HEADERS = [
     "Fecha", "Mensajes", "Citas solicitadas", "Citas confirmadas",
     "Citas rechazadas", "Errores", "No soportados (audio/sticker/etc)",
     "Alucinaciones bloqueadas", "Citas canceladas", "Citas modificadas",
-    "Avisos de negocio actualizados",
+    "Avisos de negocio actualizados", "Interesados registrados",
 ]
 EVENT_COLUMN = {
     "mensaje_respondido": 1,
@@ -34,6 +34,7 @@ EVENT_COLUMN = {
     "cita_cancelada": 8,
     "aviso_negocio_actualizado": 10,
     "cita_modificada": 9,
+    "lead_registrado": 11,
 }
 
 CITAS_HEADERS = ["Folio", "Fecha", "customer_wa_id", "nombre", "servicio", "horario", "estado", "correo", "negocio_cliente"]
