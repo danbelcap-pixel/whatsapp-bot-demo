@@ -367,6 +367,45 @@ def mark_appointment_resolved(business_name: str, row_number: int, estado: str) 
 
 # ─── Config de negocios (multi-tenant) ──────────────────────────────────
 
+def _row_to_business_config(row: list) -> dict | None:
+    """Arma el dict de configuración de un negocio a partir de su fila en
+    'Clientes', sin importar qué columna se usó para encontrarla (Phone
+    Number ID, Widget ID, o Telegram Chat ID) — así el "business_id"
+    universal (usado como llave de memoria/avisos/cache) siempre sale
+    igual para la misma fila, sin importar el canal por el que llegó el
+    mensaje que la buscó. Devuelve None si el negocio está inactivo."""
+    activo = row[4].strip().upper() if len(row) > 4 else "SI"
+    if activo not in ("SI", "SÍ", "YES", "TRUE", "1"):
+        return None
+
+    phone_number_id = row[0].strip() if len(row) > 0 else ""
+    widget_id = row[9].strip() if len(row) > 9 else ""
+    telegram_chat_id = row[10].strip() if len(row) > 10 else ""
+    agenda_citas = row[8].strip().upper() if len(row) > 8 else "SI"
+
+    # Prioridad fija: phone_number_id > widget_id > telegram_chat_id. Si un
+    # negocio tiene varios canales configurados (ej. widget + Telegram, o
+    # WhatsApp + widget), siempre resulta en el MISMO business_id sin
+    # importar cuál de las tres funciones de búsqueda encontró la fila.
+    business_id = phone_number_id or (f"widget:{widget_id}" if widget_id else "") or f"telegram:{telegram_chat_id}"
+
+    return {
+        "business_id": business_id,
+        "phone_number_id": phone_number_id,
+        "name": row[1].strip() if len(row) > 1 else "",
+        "owner_phone": row[2].strip() if len(row) > 2 else "",
+        "notify_also": row[3].strip() if len(row) > 3 else "",
+        "info": row[5].strip() if len(row) > 5 else "",
+        "tono": row[6].strip() if len(row) > 6 else "",
+        "objetivo": row[7].strip() if len(row) > 7 else "",
+        # Vacío/"SI" = usa citas (compatible con clientes ya dados de alta
+        # antes de que esta columna existiera).
+        "agenda_citas": agenda_citas not in ("NO", "FALSE", "0"),
+        "widget_id": widget_id,
+        "telegram_chat_id": telegram_chat_id,
+    }
+
+
 def get_business_config_row(phone_number_id: str) -> dict | None:
     """Busca en la pestaña 'Clientes' el negocio dueño de este
     phone_number_id (el número de WhatsApp que recibió el mensaje). None si
@@ -381,27 +420,7 @@ def get_business_config_row(phone_number_id: str) -> dict | None:
         rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:K")
         for row in rows:
             if len(row) >= 1 and row[0].strip() == phone_number_id:
-                activo = row[4].strip().upper() if len(row) > 4 else "SI"
-                if activo not in ("SI", "SÍ", "YES", "TRUE", "1"):
-                    return None
-                agenda_citas = row[8].strip().upper() if len(row) > 8 else "SI"
-                return {
-                    # "business_id" es el identificador universal usado para
-                    # memoria/avisos/cache, sin importar el canal — para
-                    # WhatsApp es el mismo phone_number_id.
-                    "business_id": row[0].strip(),
-                    "phone_number_id": row[0].strip(),
-                    "name": row[1].strip() if len(row) > 1 else "",
-                    "owner_phone": row[2].strip() if len(row) > 2 else "",
-                    "notify_also": row[3].strip() if len(row) > 3 else "",
-                    "info": row[5].strip() if len(row) > 5 else "",
-                    "tono": row[6].strip() if len(row) > 6 else "",
-                    "objetivo": row[7].strip() if len(row) > 7 else "",
-                    # Vacío/"SI" = usa citas (compatible con clientes ya
-                    # dados de alta antes de que esta columna existiera).
-                    "agenda_citas": agenda_citas not in ("NO", "FALSE", "0"),
-                    "telegram_chat_id": row[10].strip() if len(row) > 10 else "",
-                }
+                return _row_to_business_config(row)
         return None
     except Exception:
         log.exception("No se pudo leer la pestaña Clientes de Google Sheets")
@@ -411,9 +430,7 @@ def get_business_config_row(phone_number_id: str) -> dict | None:
 def get_business_config_by_widget_id(widget_id: str) -> dict | None:
     """Como get_business_config_row, pero busca por 'Widget ID' (columna J)
     en vez de por Phone Number ID — para negocios que usan el chat de su
-    página web en vez de (o además de) WhatsApp. El "business_id" universal
-    se prefija con 'widget:' para que nunca choque con un phone_number_id
-    real, aunque el negocio no tenga número de WhatsApp dado de alta."""
+    página web en vez de (o además de) WhatsApp."""
     sheet_id = os.getenv("GOOGLE_SHEET_ID")
     if not sheet_id or not widget_id:
         return None
@@ -422,23 +439,7 @@ def get_business_config_by_widget_id(widget_id: str) -> dict | None:
         rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:K")
         for row in rows:
             if len(row) > 9 and row[9].strip() == widget_id:
-                activo = row[4].strip().upper() if len(row) > 4 else "SI"
-                if activo not in ("SI", "SÍ", "YES", "TRUE", "1"):
-                    return None
-                agenda_citas = row[8].strip().upper() if len(row) > 8 else "SI"
-                return {
-                    "business_id": f"widget:{widget_id}",
-                    "phone_number_id": row[0].strip() if len(row) > 0 else "",
-                    "name": row[1].strip() if len(row) > 1 else "",
-                    "owner_phone": row[2].strip() if len(row) > 2 else "",
-                    "notify_also": row[3].strip() if len(row) > 3 else "",
-                    "info": row[5].strip() if len(row) > 5 else "",
-                    "tono": row[6].strip() if len(row) > 6 else "",
-                    "objetivo": row[7].strip() if len(row) > 7 else "",
-                    "agenda_citas": agenda_citas not in ("NO", "FALSE", "0"),
-                    "widget_id": widget_id,
-                    "telegram_chat_id": row[10].strip() if len(row) > 10 else "",
-                }
+                return _row_to_business_config(row)
         return None
     except Exception:
         log.exception("No se pudo leer la pestaña Clientes de Google Sheets (por widget_id)")
@@ -458,25 +459,7 @@ def get_business_config_by_telegram_chat_id(chat_id: str) -> dict | None:
         rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:K")
         for row in rows:
             if len(row) > 10 and row[10].strip() == str(chat_id):
-                activo = row[4].strip().upper() if len(row) > 4 else "SI"
-                if activo not in ("SI", "SÍ", "YES", "TRUE", "1"):
-                    return None
-                agenda_citas = row[8].strip().upper() if len(row) > 8 else "SI"
-                phone_number_id = row[0].strip() if len(row) > 0 else ""
-                widget_id = row[9].strip() if len(row) > 9 else ""
-                return {
-                    "business_id": phone_number_id or f"widget:{widget_id}" or f"telegram:{chat_id}",
-                    "phone_number_id": phone_number_id,
-                    "name": row[1].strip() if len(row) > 1 else "",
-                    "owner_phone": row[2].strip() if len(row) > 2 else "",
-                    "notify_also": row[3].strip() if len(row) > 3 else "",
-                    "info": row[5].strip() if len(row) > 5 else "",
-                    "tono": row[6].strip() if len(row) > 6 else "",
-                    "objetivo": row[7].strip() if len(row) > 7 else "",
-                    "agenda_citas": agenda_citas not in ("NO", "FALSE", "0"),
-                    "widget_id": widget_id,
-                    "telegram_chat_id": str(chat_id),
-                }
+                return _row_to_business_config(row)
         return None
     except Exception:
         log.exception("No se pudo leer la pestaña Clientes de Google Sheets (por telegram_chat_id)")
