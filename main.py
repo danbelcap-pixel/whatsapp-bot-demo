@@ -295,9 +295,11 @@ def notify_owner_new_request(business: dict, req: dict, folio: int | None) -> No
 
     folio_texto = str(folio) if folio else "?"
     params = [folio_texto, req["nombre"], req["servicio"], req["horario"]]
+    negocio_cliente = req.get("negocio_cliente", "")
+    negocio_texto = f"\nNegocio: {negocio_cliente}" if negocio_cliente else ""
     owner_text = (
         f"📅 Nueva solicitud de cita, folio {folio_texto}.\n"
-        f"Nombre: {req['nombre']}\nServicio: {req['servicio']}\nHorario pedido: {req['horario']}\n\n"
+        f"Nombre: {req['nombre']}{negocio_texto}\nServicio: {req['servicio']}\nHorario pedido: {req['horario']}\n\n"
         f"Responde SI para confirmar, NO para rechazar, o propone otro horario."
     )
     notify_staff(business, "cita_nueva_solicitud", params, owner_text, "cita_nueva_informativa", params)

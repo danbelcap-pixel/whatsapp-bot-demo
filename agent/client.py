@@ -61,6 +61,15 @@ BOOKING_TOOL = {
                     "otro caso — nunca lo pidas en WhatsApp."
                 ),
             },
+            "negocio_cliente": {
+                "type": "string",
+                "description": (
+                    "SOLO si el negocio te pidió preguntarlo (ver información del "
+                    "negocio arriba): el nombre del negocio del cliente que "
+                    "escribe, para no confundir su solicitud con la de alguien "
+                    "más. Omite este campo si no aplica."
+                ),
+            },
         },
         "required": ["nombre", "servicio", "horario"],
     },
@@ -465,6 +474,7 @@ def ask_agent(
             action = {
                 "type": "crear", "nombre": inp["nombre"], "servicio": inp["servicio"],
                 "horario": inp["horario"], "correo": inp.get("correo", ""),
+                "negocio_cliente": inp.get("negocio_cliente", ""),
             }
             reply = (
                 f"¡Perfecto, {inp['nombre']}! Voy a confirmar tu cita para "
