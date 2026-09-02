@@ -36,7 +36,7 @@ EVENT_COLUMN = {
     "cita_modificada": 9,
 }
 
-CITAS_HEADERS = ["Folio", "Fecha", "customer_wa_id", "nombre", "servicio", "horario", "estado"]
+CITAS_HEADERS = ["Folio", "Fecha", "customer_wa_id", "nombre", "servicio", "horario", "estado", "correo"]
 _INACTIVE_STATES = ("rechazada", "cancelada_por_cliente")
 
 # Pestaña de control con un renglón por negocio dado de alta — permite que
@@ -197,6 +197,7 @@ def _row_to_appointment(row: list, row_number: int) -> dict:
         "servicio": row[4],
         "horario": row[5],
         "estado": row[6] if len(row) > 6 else "",
+        "correo": row[7] if len(row) > 7 else "",
     }
 
 
@@ -253,7 +254,10 @@ def add_pending_appointment(business_name: str, customer_wa_id: str, req: dict) 
         folio = len(rows) + 1
 
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-        row = [folio, timestamp, customer_wa_id, req["nombre"], req["servicio"], req["horario"], "pendiente"]
+        row = [
+            folio, timestamp, customer_wa_id, req["nombre"], req["servicio"], req["horario"],
+            "pendiente", req.get("correo", ""),
+        ]
         _values_append(sheet_id, f"'{tab}'!A1", [row])
         return folio
     except Exception:
@@ -270,7 +274,7 @@ def get_pending_appointment_by_folio(business_name: str, folio: int) -> dict | N
     try:
         tab = _citas_tab_name(business_name)
         _ensure_tab_exists(sheet_id, tab, CITAS_HEADERS)
-        rows = _values_get(sheet_id, f"'{tab}'!A2:G")
+        rows = _values_get(sheet_id, f"'{tab}'!A2:H")
         for i, row in enumerate(rows, start=2):
             if len(row) >= 7 and row[6] == "pendiente" and str(row[0]) == str(folio):
                 return _row_to_appointment(row, i)
@@ -289,7 +293,7 @@ def list_pending_appointments(business_name: str) -> list[dict]:
     try:
         tab = _citas_tab_name(business_name)
         _ensure_tab_exists(sheet_id, tab, CITAS_HEADERS)
-        rows = _values_get(sheet_id, f"'{tab}'!A2:G")
+        rows = _values_get(sheet_id, f"'{tab}'!A2:H")
         return [
             _row_to_appointment(row, i)
             for i, row in enumerate(rows, start=2)
@@ -310,7 +314,7 @@ def get_customer_active_appointments(business_name: str, wa_id: str) -> list[dic
     try:
         tab = _citas_tab_name(business_name)
         _ensure_tab_exists(sheet_id, tab, CITAS_HEADERS)
-        rows = _values_get(sheet_id, f"'{tab}'!A2:G")
+        rows = _values_get(sheet_id, f"'{tab}'!A2:H")
         return [
             _row_to_appointment(row, i)
             for i, row in enumerate(rows, start=2)
@@ -331,7 +335,7 @@ def get_appointment_by_folio(business_name: str, folio: int) -> dict | None:
     try:
         tab = _citas_tab_name(business_name)
         _ensure_tab_exists(sheet_id, tab, CITAS_HEADERS)
-        rows = _values_get(sheet_id, f"'{tab}'!A2:G")
+        rows = _values_get(sheet_id, f"'{tab}'!A2:H")
         for i, row in enumerate(rows, start=2):
             if len(row) >= 7 and str(row[0]) == str(folio):
                 return _row_to_appointment(row, i)

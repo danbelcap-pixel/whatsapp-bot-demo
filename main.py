@@ -258,6 +258,36 @@ def alert_daniel(business: dict | None, message: str) -> None:
         log.exception("No se pudo mandar la alerta por Telegram")
 
 
+EMAIL_FROM_DOMAIN = "beltranserviciosdigitales.com"
+
+
+def send_confirmation_email(business: dict, to_email: str, subject: str, message_text: str) -> None:
+    """Manda un correo de confirmación al cliente final — solo aplica a
+    clientes que llegaron por el chat de página web y aceptaron dar su
+    correo al agendar. Se manda ADEMÁS de guardarlo en el historial del
+    chat (ver _notify_customer), no en su lugar: si el cliente no vuelve a
+    abrir el chat, el correo es la única forma en que se entera."""
+    api_key = os.getenv("RESEND_API_KEY")
+    if not api_key or not to_email:
+        return
+    try:
+        resp = requests.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={
+                "from": f"{business['name']} <citas@{EMAIL_FROM_DOMAIN}>",
+                "to": [to_email],
+                "subject": subject,
+                "html": f"<p>{message_text}</p>",
+            },
+            timeout=15,
+        )
+        if resp.status_code >= 400:
+            log.error("Error enviando correo a %s: %s %s", to_email, resp.status_code, resp.text)
+    except requests.RequestException:
+        log.exception("No se pudo mandar el correo de confirmación a %s", to_email)
+
+
 def notify_owner_new_request(business: dict, req: dict, folio: int | None) -> None:
     if not _has_owner_contact(business):
         alert_daniel(business, f"Se pidió una cita pero este negocio no tiene forma de avisarle al dueño configurada: {req}")
@@ -303,6 +333,7 @@ def notify_owner_modification(business: dict, cita: dict, nuevo_horario: str) ->
 def _notify_customer(
     business: dict, customer_id: str, message_text: str,
     template_name: str, template_params: list[str],
+    correo: str = "",
 ) -> None:
     """Manda el resultado de una cita al CLIENTE final, sin importar por
     qué canal llegó. Por WhatsApp usa la plantilla pre-aprobada (funciona
@@ -310,11 +341,15 @@ def _notify_customer(
     no tiene forma de recibir un mensaje "empujado" a un navegador que ya
     cerró — en vez de eso, se guarda en su historial de conversación, y lo
     ve tal cual la próxima vez que abra el chat, como si el bot se lo
-    hubiera dicho en ese momento."""
+    hubiera dicho en ese momento. Si además dejó un correo al agendar, se le
+    manda también por ahí — no en lugar del historial, sino además, por si
+    no vuelve a abrir el chat."""
     if customer_id.startswith(WEB_VISITOR_PREFIX):
         history = get_history(business["business_id"], customer_id)
         history.append({"role": "assistant", "content": [{"type": "text", "text": message_text}]})
         save_history(business["business_id"], customer_id, history)
+        if correo:
+            send_confirmation_email(business, correo, f"Actualización de tu cita — {business['name']}", message_text)
     else:
         send_whatsapp_template(business, customer_id, template_name, template_params)
 
@@ -334,6 +369,7 @@ def _resolve_citas_reply(business: dict, req: dict, reply_text: str) -> None:
             business, req["customer_wa_id"],
             f"¡Confirmado! Tu cita para {req['servicio']} quedó agendada el {req['horario']}. Te esperamos.",
             "cita_confirmada_cliente", [req["servicio"], req["horario"]],
+            correo=req.get("correo", ""),
         )
         mark_appointment_resolved(negocio, req["row_number"], "confirmada")
         log_event(negocio, "cita_confirmada")
@@ -342,6 +378,7 @@ def _resolve_citas_reply(business: dict, req: dict, reply_text: str) -> None:
             business, req["customer_wa_id"],
             "Ese horario no está disponible. ¿Tienes otro horario que te funcione? Escríbenos de nuevo para revisar otra opción.",
             "cita_rechazada_cliente", [],
+            correo=req.get("correo", ""),
         )
         mark_appointment_resolved(negocio, req["row_number"], "rechazada")
         log_event(negocio, "cita_rechazada")
@@ -351,6 +388,7 @@ def _resolve_citas_reply(business: dict, req: dict, reply_text: str) -> None:
             business, req["customer_wa_id"],
             f"Tu horario solicitado no estaba disponible, pero te proponemos: {reply_text}. ¿Te funciona?",
             "cita_horario_alternativo_cliente", [reply_text],
+            correo=req.get("correo", ""),
         )
         mark_appointment_resolved(negocio, req["row_number"], f"horario_alternativo: {reply_text[:100]}")
 

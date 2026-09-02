@@ -52,6 +52,15 @@ BOOKING_TOOL = {
                 "type": "string",
                 "description": "Día y hora que pidió el cliente, tal cual lo dijo (texto libre)",
             },
+            "correo": {
+                "type": "string",
+                "description": (
+                    "Correo del cliente, SOLO si estás en el chat de una página "
+                    "web y el cliente aceptó que le manden la confirmación por "
+                    "correo también. Omite este campo por completo en cualquier "
+                    "otro caso — nunca lo pidas en WhatsApp."
+                ),
+            },
         },
         "required": ["nombre", "servicio", "horario"],
     },
@@ -167,6 +176,7 @@ def _system_prompt(
     tono: str = "",
     objetivo: str = "",
     permite_citas: bool = True,
+    es_canal_web: bool = False,
 ) -> str:
     info_texto = (
         f"\nINFORMACIÓN DE ESTE NEGOCIO — úsala para contestar preguntas de "
@@ -204,10 +214,20 @@ def _system_prompt(
     )
 
     if permite_citas:
-        capacidades_citas = """\
+        correo_texto = (
+            """
+- Este cliente te escribe desde el chat de la página web (no WhatsApp).
+  Cuando tomes una solicitud de cita, antes de usar la herramienta
+  ofrécele mandarle la confirmación también por correo (además de que la
+  vea aquí en el chat). Si acepta, pídele su correo y ponlo en el campo
+  "correo" de la herramienta. Si no quiere o no contesta, sigue sin ese
+  dato, sin insistir."""
+            if es_canal_web else ""
+        )
+        capacidades_citas = f"""\
 - Tomar solicitudes de cita NUEVA: si el cliente quiere agendar, pídele
   nombre, servicio y horario preferido. En cuanto tengas los tres datos, tu
-  ÚNICA acción posible es usar la herramienta "solicitar_cita".
+  ÚNICA acción posible es usar la herramienta "solicitar_cita".{correo_texto}
 - Cancelar una cita EXISTENTE del cliente (ver la lista de arriba) con la
   herramienta "cancelar_cita", usando el folio exacto de la lista.
 - Mover el horario de una cita EXISTENTE del cliente (ver la lista de
@@ -236,7 +256,7 @@ herramienta es que estás confirmando con el negocio y en breve avisas
         )
 
     return f"""\
-Eres el asistente de atención al cliente por WhatsApp de {negocio}.
+Eres el asistente de atención al cliente de {negocio}, en {"el chat de su página web" if es_canal_web else "WhatsApp"}.
 
 Responde dudas de clientes de forma breve, cálida y directa, como lo haría
 un empleado que conoce bien el negocio. Nunca inventes precios, horarios o
@@ -286,8 +306,8 @@ el cliente insista o se moleste:
   menciones al cliente.
 
 Esto es una demostración: si te preguntan qué eres, explica que eres un
-agente de IA conectado a WhatsApp que puede automatizar respuestas y toma de
-citas 24/7 para negocios reales."""
+agente de IA conectado a {"esta página web" if es_canal_web else "WhatsApp"}
+que puede automatizar respuestas y toma de citas 24/7 para negocios reales."""
 
 
 def _trim(history: list[dict]) -> list[dict]:
@@ -321,6 +341,7 @@ def _call_claude(
     tono: str = "",
     objetivo: str = "",
     permite_citas: bool = True,
+    es_canal_web: bool = False,
     force_any_tool: bool = False,
 ) -> tuple[list[dict], str, dict | None]:
     """Llama a Claude y devuelve (content_serializable, texto, tool_use_block)."""
@@ -334,6 +355,7 @@ def _call_claude(
                 "text": _system_prompt(
                     negocio, info_negocio, citas_activas, aviso_negocio,
                     tono=tono, objetivo=objetivo, permite_citas=permite_citas,
+                    es_canal_web=es_canal_web,
                 ),
                 "cache_control": {"type": "ephemeral"},
             }
@@ -389,6 +411,10 @@ def ask_agent(
     tono = business.get("tono", "")
     objetivo = business.get("objetivo", "")
     permite_citas = business.get("agenda_citas", True)
+    # El chat de página web usa el mismo formato de wa_id que se define en
+    # main.py (WEB_VISITOR_PREFIX = "web:") — si ese prefijo cambia allá,
+    # hay que actualizarlo aquí también.
+    es_canal_web = wa_id.startswith("web:")
     citas_activas = get_customer_active_appointments(negocio, wa_id) if permite_citas else []
     aviso_negocio = get_business_notice(business_id)
 
@@ -398,7 +424,7 @@ def ask_agent(
 
     content, text, tool_block = _call_claude(
         negocio, info_negocio, history, citas_activas, aviso_negocio,
-        tono=tono, objetivo=objetivo, permite_citas=permite_citas,
+        tono=tono, objetivo=objetivo, permite_citas=permite_citas, es_canal_web=es_canal_web,
     )
     history.append({"role": "assistant", "content": content})
 
@@ -412,7 +438,8 @@ def ask_agent(
         hallucination_detected = True
         retry_content, _, retry_tool_block = _call_claude(
             negocio, info_negocio, history[:-1], citas_activas, aviso_negocio,
-            tono=tono, objetivo=objetivo, permite_citas=permite_citas, force_any_tool=True,
+            tono=tono, objetivo=objetivo, permite_citas=permite_citas,
+            es_canal_web=es_canal_web, force_any_tool=True,
         )
         if retry_tool_block:
             content, tool_block = retry_content, retry_tool_block
@@ -435,7 +462,10 @@ def ask_agent(
         })
 
         if name == "solicitar_cita":
-            action = {"type": "crear", "nombre": inp["nombre"], "servicio": inp["servicio"], "horario": inp["horario"]}
+            action = {
+                "type": "crear", "nombre": inp["nombre"], "servicio": inp["servicio"],
+                "horario": inp["horario"], "correo": inp.get("correo", ""),
+            }
             reply = (
                 f"¡Perfecto, {inp['nombre']}! Voy a confirmar tu cita para "
                 f"{inp['servicio']} el {inp['horario']}. En un momento te "
