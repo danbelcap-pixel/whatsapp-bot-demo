@@ -140,6 +140,24 @@
       });
   }
 
+  function syncRenderedCount() {
+    // Vuelve a consultar el número real de mensajes visibles guardados en
+    // el servidor — no se puede adivinar cuántos se agregaron después de
+    // mandar un mensaje, porque una acción de citas (agendar/cancelar/
+    // modificar) a veces no deja un texto visible adicional en el
+    // historial (solo la confirmación que ya se mostró aquí mismo).
+    // Adivinar mal desincroniza el conteo y hace que una actualización
+    // real (la del dueño respondiendo) se "brinque" sin mostrarse nunca.
+    var url = apiBase + "/widget/history?widget_id=" + encodeURIComponent(widgetId) +
+      "&visitor_id=" + encodeURIComponent(visitorId);
+    fetch(url)
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        renderedCount = (data.messages || []).length;
+      })
+      .catch(function () {});
+  }
+
   function checkForUpdates() {
     // Mientras el chat esté abierto, revisa cada pocos segundos si llegó
     // algo nuevo al historial (por ejemplo, la respuesta del dueño del
@@ -193,10 +211,6 @@
       .then(function (data) {
         typingEl.remove();
         appendMessage("assistant", data.reply || "No pude procesar tu mensaje, intenta de nuevo.");
-        // El servidor guardó exactamente 2 entradas visibles por este
-        // intercambio (el mensaje del cliente y la respuesta) — se suma
-        // aquí para que el siguiente sondeo no las vuelva a mostrar.
-        renderedCount += 2;
       })
       .catch(function () {
         typingEl.remove();
@@ -204,6 +218,7 @@
       })
       .finally(function () {
         sendBtn.disabled = false;
+        syncRenderedCount();
       });
   }
 
