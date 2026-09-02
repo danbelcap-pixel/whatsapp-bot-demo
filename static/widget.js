@@ -222,15 +222,30 @@
       });
   }
 
+  function openPanel() {
+    panel.classList.add("open");
+    loadHistory();
+    startPolling();
+    inputEl.focus();
+  }
+
   bubble.addEventListener("click", function () {
-    panel.classList.toggle("open");
     if (panel.classList.contains("open")) {
-      loadHistory();
-      startPolling();
-      inputEl.focus();
-    } else {
+      panel.classList.remove("open");
       stopPolling();
+    } else {
+      openPanel();
     }
+  });
+
+  // Cualquier elemento de la página con este atributo abre el chat al
+  // dársele clic — así el sitio puede tener botones propios invitando a
+  // "hablar con el asistente" en vez de depender solo de la burbuja.
+  document.querySelectorAll("[data-bsd-chat-trigger]").forEach(function (el) {
+    el.addEventListener("click", function (e) {
+      e.preventDefault();
+      openPanel();
+    });
   });
   closeBtn.addEventListener("click", function () {
     panel.classList.remove("open");
