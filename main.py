@@ -7,11 +7,17 @@ import re
 
 import requests
 from dotenv import load_dotenv
-from flask import Flask, request
+from flask import Flask, jsonify, request
 
 from agent.client import ask_agent, interpret_owner_instruction
-from services.business import get_business_config
-from services.memory import is_duplicate_message, save_business_notice
+from services.business import get_business_config, get_business_config_by_widget
+from services.memory import (
+    check_widget_rate_limit,
+    get_history,
+    is_duplicate_message,
+    save_business_notice,
+    save_history,
+)
 from services.sheets import (
     add_pending_appointment,
     get_appointment_by_folio,
@@ -21,6 +27,9 @@ from services.sheets import (
     mark_appointment_resolved,
     update_appointment_horario,
 )
+
+WEB_VISITOR_PREFIX = "web:"
+WIDGET_MAX_MESSAGE_LENGTH = 2000
 
 load_dotenv()
 
@@ -225,6 +234,25 @@ def notify_owner_modification(business: dict, cita: dict, nuevo_horario: str) ->
     notify_staff(business, "cita_cambio_solicitado", params, "cita_cambio_informativa", params)
 
 
+def _notify_customer(
+    business: dict, customer_id: str, message_text: str,
+    template_name: str, template_params: list[str],
+) -> None:
+    """Manda el resultado de una cita al CLIENTE final, sin importar por
+    qué canal llegó. Por WhatsApp usa la plantilla pre-aprobada (funciona
+    aunque hayan pasado más de 24h). Un visitante del chat de la página web
+    no tiene forma de recibir un mensaje "empujado" a un navegador que ya
+    cerró — en vez de eso, se guarda en su historial de conversación, y lo
+    ve tal cual la próxima vez que abra el chat, como si el bot se lo
+    hubiera dicho en ese momento."""
+    if customer_id.startswith(WEB_VISITOR_PREFIX):
+        history = get_history(business["business_id"], customer_id)
+        history.append({"role": "assistant", "content": [{"type": "text", "text": message_text}]})
+        save_history(business["business_id"], customer_id, history)
+    else:
+        send_whatsapp_template(business, customer_id, template_name, template_params)
+
+
 def _resolve_citas_reply(business: dict, req: dict, reply_text: str) -> None:
     """Aplica la respuesta del dueño (SI/NO/horario alternativo) a una
     solicitud de cita específica ya identificada sin ambigüedad."""
@@ -234,23 +262,29 @@ def _resolve_citas_reply(business: dict, req: dict, reply_text: str) -> None:
     # Estos avisos van al CLIENTE, y el bot los inicia por su cuenta — el
     # dueño pudo haber tardado horas en contestar, así que no se puede
     # asumir que la ventana de 24h del cliente siga abierta. Por eso usan
-    # plantilla, no texto libre.
+    # plantilla, no texto libre (o el equivalente guardado, si es del widget).
     if reply_normalized in ("si", "sí", "yes", "ok", "dale"):
-        send_whatsapp_template(
-            business, req["customer_wa_id"], "cita_confirmada_cliente",
-            [req["servicio"], req["horario"]],
+        _notify_customer(
+            business, req["customer_wa_id"],
+            f"¡Confirmado! Tu cita para {req['servicio']} quedó agendada el {req['horario']}. Te esperamos.",
+            "cita_confirmada_cliente", [req["servicio"], req["horario"]],
         )
         mark_appointment_resolved(negocio, req["row_number"], "confirmada")
         log_event(negocio, "cita_confirmada")
     elif reply_normalized == "no":
-        send_whatsapp_template(business, req["customer_wa_id"], "cita_rechazada_cliente", [])
+        _notify_customer(
+            business, req["customer_wa_id"],
+            "Ese horario no está disponible. ¿Tienes otro horario que te funcione? Escríbenos de nuevo para revisar otra opción.",
+            "cita_rechazada_cliente", [],
+        )
         mark_appointment_resolved(negocio, req["row_number"], "rechazada")
         log_event(negocio, "cita_rechazada")
     else:
         # El dueño escribió un horario alternativo en texto libre
-        send_whatsapp_template(
-            business, req["customer_wa_id"], "cita_horario_alternativo_cliente",
-            [reply_text],
+        _notify_customer(
+            business, req["customer_wa_id"],
+            f"Tu horario solicitado no estaba disponible, pero te proponemos: {reply_text}. ¿Te funciona?",
+            "cita_horario_alternativo_cliente", [reply_text],
         )
         mark_appointment_resolved(negocio, req["row_number"], f"horario_alternativo: {reply_text[:100]}")
 
@@ -310,7 +344,7 @@ def handle_owner_reply(business: dict, text: str) -> None:
     # a Claude qué es en realidad.
     aviso = interpret_owner_instruction(negocio, text)
     if aviso:
-        save_business_notice(business["phone_number_id"], aviso)
+        save_business_notice(business["business_id"], aviso)
         send_whatsapp_message(business, owner, f'Anotado — les voy a avisar a los clientes: "{aviso}"')
         log_event(negocio, "aviso_negocio_actualizado")
         return
@@ -470,13 +504,24 @@ def receive_message():
         )
         log_event(business["name"], "alucinacion_detectada")
 
-    if action and action["type"] == "crear":
+    if action:
+        _handle_agent_action(business, wa_id, action)
+
+    return "OK", 200
+
+
+def _handle_agent_action(business: dict, wa_id: str, action: dict) -> None:
+    """Aplica la acción que Claude decidió tomar (crear/cancelar/modificar
+    una cita) — compartido entre el canal de WhatsApp y el del chat de
+    página web, la lógica (y sobre todo la validación de seguridad) es
+    exactamente la misma sin importar de dónde vino el mensaje."""
+    if action["type"] == "crear":
         folio = add_pending_appointment(business["name"], wa_id, action)
         action["customer_wa_id"] = wa_id
         notify_owner_new_request(business, action, folio)
         log_event(business["name"], "cita_solicitada")
 
-    elif action and action["type"] in ("cancelar", "modificar"):
+    elif action["type"] in ("cancelar", "modificar"):
         # Verificación de seguridad: el folio debe pertenecer a QUIEN
         # escribió, sin importar lo que haya dicho Claude — nunca se confía
         # ciegamente en que el modelo eligió el folio correcto.
@@ -497,7 +542,103 @@ def receive_message():
             notify_owner_modification(business, cita, action["nuevo_horario"])
             log_event(business["name"], "cita_modificada")
 
-    return "OK", 200
+
+def _widget_cors(response):
+    """El widget se embebe en dominios de terceros (la página del cliente),
+    así que el navegador exige CORS para que el fetch() no se bloquee."""
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    return response
+
+
+@app.route("/widget/message", methods=["POST", "OPTIONS"])
+def widget_message():
+    if request.method == "OPTIONS":
+        return _widget_cors(app.make_default_options_response())
+
+    payload = request.get_json(silent=True) or {}
+    widget_id = str(payload.get("widget_id", "")).strip()
+    visitor_id = str(payload.get("visitor_id", "")).strip()
+    message = str(payload.get("message", "")).strip()
+
+    if not widget_id or not visitor_id or not message:
+        return _widget_cors(jsonify({"error": "Faltan datos (widget_id, visitor_id o message)."})), 400
+    if len(message) > WIDGET_MAX_MESSAGE_LENGTH:
+        return _widget_cors(jsonify({"error": "Mensaje demasiado largo."})), 400
+
+    business = get_business_config_by_widget(widget_id)
+    if not business:
+        return _widget_cors(jsonify({"error": "Widget no reconocido."})), 404
+
+    wa_id = f"{WEB_VISITOR_PREFIX}{visitor_id}"
+
+    if not check_widget_rate_limit(visitor_id):
+        return _widget_cors(jsonify({
+            "reply": "Has mandado muchos mensajes en poco tiempo — intenta de nuevo en un rato, por favor.",
+        }))
+
+    try:
+        reply, action, hallucination_detected = ask_agent(business, wa_id, message)
+    except Exception as exc:
+        log.exception("Fallo llamando a Claude para el widget de %s", business["name"])
+        alert_daniel(business, f"Falló la llamada a Claude respondiéndole a un visitante del widget: {exc}")
+        return _widget_cors(jsonify({
+            "reply": "Ando teniendo un problema técnico ahora mismo — dame un momento e intenta de nuevo, por favor 🙏",
+        }))
+
+    log_event(business["name"], "mensaje_respondido")
+
+    if hallucination_detected:
+        alert_daniel(
+            business,
+            f"El bot (widget web) casi confirma una acción falsa de cita a "
+            f"{wa_id} sin usar la herramienta real — se bloqueó "
+            f"automáticamente, pero revisa el prompt, esto no debería pasar."
+        )
+        log_event(business["name"], "alucinacion_detectada")
+
+    if action:
+        _handle_agent_action(business, wa_id, action)
+
+    return _widget_cors(jsonify({"reply": reply}))
+
+
+@app.route("/widget/history", methods=["GET", "OPTIONS"])
+def widget_history():
+    if request.method == "OPTIONS":
+        return _widget_cors(app.make_default_options_response())
+
+    widget_id = request.args.get("widget_id", "").strip()
+    visitor_id = request.args.get("visitor_id", "").strip()
+    if not widget_id or not visitor_id:
+        return _widget_cors(jsonify({"error": "Faltan datos."})), 400
+
+    business = get_business_config_by_widget(widget_id)
+    if not business:
+        return _widget_cors(jsonify({"error": "Widget no reconocido."})), 404
+
+    wa_id = f"{WEB_VISITOR_PREFIX}{visitor_id}"
+    history = get_history(business["business_id"], wa_id)
+
+    # El historial guardado incluye bloques internos (tool_use/tool_result)
+    # que no le sirven al frontend — solo el texto visible para humanos.
+    mensajes = []
+    for turno in history:
+        content = turno.get("content")
+        if isinstance(content, str):
+            texto = content
+        elif isinstance(content, list):
+            texto = "".join(
+                b.get("text", "") for b in content
+                if isinstance(b, dict) and b.get("type") == "text"
+            )
+        else:
+            texto = ""
+        if texto.strip():
+            mensajes.append({"role": turno.get("role"), "text": texto})
+
+    return _widget_cors(jsonify({"messages": mensajes}))
 
 
 @app.get("/")

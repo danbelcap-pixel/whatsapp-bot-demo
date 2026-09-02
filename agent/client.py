@@ -363,9 +363,10 @@ def ask_agent(
 ) -> tuple[str, dict | None, bool]:
     """Devuelve (texto_para_el_cliente, accion, alucinacion_detectada).
 
-    business: dict con "phone_number_id", "name", "owner_phone",
-    "notify_also" — resuelto por services.business.get_business_config a
-    partir del número de WhatsApp que recibió el mensaje. Así el mismo
+    business: dict con "business_id" (identificador universal, sin importar
+    el canal), "phone_number_id", "name", "owner_phone", "notify_also" —
+    resuelto por services.business.get_business_config (WhatsApp) o
+    get_business_config_by_widget (chat de página web). Así el mismo
     despliegue atiende a varios negocios a la vez, cada uno con su propio
     número, su propia pestaña de citas y su propia memoria de conversación.
 
@@ -382,7 +383,7 @@ def ask_agent(
     vez de user_message — para no arrastrar contenido pesado (fotos en
     base64) en cada turno futuro de la conversación, que infla memoria y
     costo de API cada vez que se reenvía el historial completo."""
-    business_id = business["phone_number_id"]
+    business_id = business["business_id"]
     negocio = business["name"]
     info_negocio = business.get("info", "")
     tono = business.get("tono", "")

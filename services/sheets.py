@@ -47,7 +47,7 @@ CLIENTES_TAB = "Clientes"
 CLIENTES_HEADERS = [
     "Phone Number ID", "Nombre del negocio", "Teléfono del dueño",
     "Teléfonos adicionales", "Activo", "Información del negocio",
-    "Tono del bot", "Objetivo del bot", "Agenda citas",
+    "Tono del bot", "Objetivo del bot", "Agenda citas", "Widget ID",
 ]
 
 
@@ -377,7 +377,7 @@ def get_business_config_row(phone_number_id: str) -> dict | None:
         return None
     try:
         _ensure_tab_exists(sheet_id, CLIENTES_TAB, CLIENTES_HEADERS)
-        rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:I")
+        rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:J")
         for row in rows:
             if len(row) >= 1 and row[0].strip() == phone_number_id:
                 activo = row[4].strip().upper() if len(row) > 4 else "SI"
@@ -385,6 +385,10 @@ def get_business_config_row(phone_number_id: str) -> dict | None:
                     return None
                 agenda_citas = row[8].strip().upper() if len(row) > 8 else "SI"
                 return {
+                    # "business_id" es el identificador universal usado para
+                    # memoria/avisos/cache, sin importar el canal — para
+                    # WhatsApp es el mismo phone_number_id.
+                    "business_id": row[0].strip(),
                     "phone_number_id": row[0].strip(),
                     "name": row[1].strip() if len(row) > 1 else "",
                     "owner_phone": row[2].strip() if len(row) > 2 else "",
@@ -399,4 +403,40 @@ def get_business_config_row(phone_number_id: str) -> dict | None:
         return None
     except Exception:
         log.exception("No se pudo leer la pestaña Clientes de Google Sheets")
+        return None
+
+
+def get_business_config_by_widget_id(widget_id: str) -> dict | None:
+    """Como get_business_config_row, pero busca por 'Widget ID' (columna J)
+    en vez de por Phone Number ID — para negocios que usan el chat de su
+    página web en vez de (o además de) WhatsApp. El "business_id" universal
+    se prefija con 'widget:' para que nunca choque con un phone_number_id
+    real, aunque el negocio no tenga número de WhatsApp dado de alta."""
+    sheet_id = os.getenv("GOOGLE_SHEET_ID")
+    if not sheet_id or not widget_id:
+        return None
+    try:
+        _ensure_tab_exists(sheet_id, CLIENTES_TAB, CLIENTES_HEADERS)
+        rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:J")
+        for row in rows:
+            if len(row) > 9 and row[9].strip() == widget_id:
+                activo = row[4].strip().upper() if len(row) > 4 else "SI"
+                if activo not in ("SI", "SÍ", "YES", "TRUE", "1"):
+                    return None
+                agenda_citas = row[8].strip().upper() if len(row) > 8 else "SI"
+                return {
+                    "business_id": f"widget:{widget_id}",
+                    "phone_number_id": row[0].strip() if len(row) > 0 else "",
+                    "name": row[1].strip() if len(row) > 1 else "",
+                    "owner_phone": row[2].strip() if len(row) > 2 else "",
+                    "notify_also": row[3].strip() if len(row) > 3 else "",
+                    "info": row[5].strip() if len(row) > 5 else "",
+                    "tono": row[6].strip() if len(row) > 6 else "",
+                    "objetivo": row[7].strip() if len(row) > 7 else "",
+                    "agenda_citas": agenda_citas not in ("NO", "FALSE", "0"),
+                    "widget_id": widget_id,
+                }
+        return None
+    except Exception:
+        log.exception("No se pudo leer la pestaña Clientes de Google Sheets (por widget_id)")
         return None

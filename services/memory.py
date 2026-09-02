@@ -153,3 +153,35 @@ def is_duplicate_message(message_id: str) -> bool:
     except Exception:
         log.exception("No se pudo verificar duplicados de mensaje en Upstash")
         return False
+
+
+WIDGET_RATE_LIMIT = 100  # mensajes por visitante por hora — ver ask_agent/widget
+WIDGET_RATE_WINDOW_SECONDS = 60 * 60
+
+
+def check_widget_rate_limit(visitor_id: str) -> bool:
+    """True si este visitante del chat web todavía puede mandar otro
+    mensaje, False si ya llegó al límite en la última hora. Es un límite
+    generoso a propósito (ningún cliente real llega a 100 mensajes/hora) —
+    solo frena scripts/ataques automatizados, no personas preguntando
+    mucho. Sin Upstash configurado, no se puede contar y se deja pasar
+    (mejor no bloquear a nadie que fallar por un problema de Redis)."""
+    url = _base_url()
+    if not url or not visitor_id:
+        return True
+    key = f"widget_rate:{visitor_id}"
+    try:
+        resp = requests.post(f"{url}/incr/{key}", headers=_headers(), timeout=10)
+        resp.raise_for_status()
+        count = resp.json().get("result", 0)
+        if count == 1:
+            # Primera vez que se usa esta llave: le pone expiración de 1h.
+            # Si esto fallara, en el peor caso la llave nunca expira y el
+            # visitante se queda bloqueado tras 100 mensajes para siempre —
+            # por eso se registra el error, aunque no se bloquee el mensaje.
+            expire_resp = requests.post(f"{url}/expire/{key}/{WIDGET_RATE_WINDOW_SECONDS}", headers=_headers(), timeout=10)
+            expire_resp.raise_for_status()
+        return count <= WIDGET_RATE_LIMIT
+    except Exception:
+        log.exception("No se pudo verificar el límite de mensajes del widget")
+        return True
