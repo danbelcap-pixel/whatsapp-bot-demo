@@ -4,3 +4,4 @@ anthropic>=0.52.0
 python-dotenv>=1.0.0
 requests>=2.31.0
 google-auth>=2.23.0
+tzdata>=2024.1

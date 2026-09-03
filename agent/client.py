@@ -1,4 +1,7 @@
 import os
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 from anthropic import Anthropic
 
 from services.memory import get_business_notice
@@ -21,6 +24,28 @@ _FAKE_CONFIRMATION_MARKERS = [
     "ya se movió", "ya quedó cambiad", "ya quedó modificad",
     "horario actualizado", "ya la movi", "ya lo movi",
 ]
+
+_DIAS_SEMANA = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
+_MESES = [
+    "enero", "febrero", "marzo", "abril", "mayo", "junio", "julio",
+    "agosto", "septiembre", "octubre", "noviembre", "diciembre",
+]
+_ZONA_REFERENCIA = ZoneInfo("America/Mexico_City")
+
+
+def _fecha_actual_str() -> str:
+    """Claude no sabe qué día es 'hoy' por su cuenta — sin esto, no puede
+    convertir 'mañana', 'el viernes', 'en dos horas', etc. a una fecha real,
+    y esas referencias relativas se quedarían guardadas tal cual en el
+    horario de una cita, lo cual es ambiguo en cuanto pasa el tiempo (el
+    dueño del negocio puede leer el aviso horas o días después). Se usa
+    la hora del centro de México como referencia única y consistente,
+    aunque el negocio esté en otro huso horario del país."""
+    ahora = datetime.now(_ZONA_REFERENCIA)
+    dia = _DIAS_SEMANA[ahora.weekday()]
+    mes = _MESES[ahora.month - 1]
+    return f"{dia} {ahora.day} de {mes} de {ahora.year}, {ahora.strftime('%H:%M')} (hora del centro de México)"
+
 
 _client: Anthropic | None = None
 
@@ -50,7 +75,13 @@ BOOKING_TOOL = {
             "servicio": {"type": "string", "description": "Servicio o motivo de la cita"},
             "horario": {
                 "type": "string",
-                "description": "Día y hora que pidió el cliente, tal cual lo dijo (texto libre)",
+                "description": (
+                    "Día y hora de la cita, SIEMPRE convertido a una fecha "
+                    "absoluta y sin ambigüedad (ej. 'viernes 6 de septiembre "
+                    "a las 4pm'), nunca una referencia relativa como "
+                    "'mañana' o 'el viernes' sin fecha — el dueño del "
+                    "negocio puede leer esto días después."
+                ),
             },
             "correo": {
                 "type": "string",
@@ -109,7 +140,13 @@ RESCHEDULE_TOOL = {
             "folio": {"type": "integer", "description": "Folio de la cita a modificar"},
             "nuevo_horario": {
                 "type": "string",
-                "description": "El nuevo horario que pide el cliente, tal cual lo dijo",
+                "description": (
+                    "El nuevo horario que pide el cliente, SIEMPRE "
+                    "convertido a una fecha absoluta y sin ambigüedad (ej. "
+                    "'viernes 6 de septiembre a las 4pm'), nunca una "
+                    "referencia relativa como 'mañana' o 'el viernes' sin "
+                    "fecha."
+                ),
             },
         },
         "required": ["folio", "nuevo_horario"],
@@ -165,7 +202,15 @@ ANNOUNCEMENT_TOOL = {
         "properties": {
             "aviso": {
                 "type": "string",
-                "description": "El aviso redactado claro, tal cual se le debe decir a un cliente que pregunte",
+                "description": (
+                    "El aviso redactado claro, tal cual se le debe decir a "
+                    "un cliente que pregunte. Si el dueño usó una fecha "
+                    "relativa ('mañana', 'el viernes'), conviértela a una "
+                    "fecha absoluta (ej. 'viernes 6 de septiembre') — este "
+                    "aviso puede seguir mostrándose días después de "
+                    "escrito, y un cliente que lo lea entonces no debe "
+                    "confundirse sobre a qué día se refería."
+                ),
             },
         },
         "required": ["aviso"],
@@ -183,7 +228,8 @@ def interpret_owner_instruction(negocio: str, text: str) -> str | None:
         system=[{
             "type": "text",
             "text": (
-                f"Eres el asistente interno de {negocio}. Este mensaje viene "
+                f"Eres el asistente interno de {negocio}. Hoy es "
+                f"{_fecha_actual_str()}. Este mensaje viene "
                 f"del DUEÑO del negocio (no de un cliente). Si te está "
                 f"avisando de un cierre especial, cambio de horario "
                 f"temporal, una promoción de sus propios productos o "
@@ -301,6 +347,16 @@ herramienta es que estás confirmando con el negocio y en breve avisas
 
     return f"""\
 Eres el asistente de atención al cliente de {negocio}, en {"el chat de su página web" if es_canal_web else "WhatsApp"}.
+
+Hoy es {_fecha_actual_str()}. Si el cliente usa una referencia relativa de
+fecha u hora ("mañana", "el viernes", "en dos horas", "la próxima semana",
+"pasado mañana"), conviértela siempre tú mismo a una fecha absoluta usando
+la fecha de hoy como base, antes de decírsela de vuelta o de usarla en
+cualquier herramienta de citas — nunca guardes ni repitas la palabra
+relativa tal cual, porque el dueño del negocio puede leer el aviso horas o
+días después y ya no sabría a qué fecha se refería. Si te preguntan
+directamente qué día es hoy, contesta con la fecha de arriba con toda
+confianza — sí la tienes.
 
 Responde dudas de clientes de forma breve, cálida y directa, como lo haría
 un empleado que conoce bien el negocio. Nunca inventes precios, horarios o
