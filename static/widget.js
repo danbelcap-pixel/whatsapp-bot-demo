@@ -22,6 +22,7 @@
   var apiBase = new URL(scriptTag.src).origin;
   var accentColor = scriptTag.getAttribute("data-color") || "#1f8a4c";
   var greeting = scriptTag.getAttribute("data-greeting") || "¡Hola! 👋 ¿En qué te puedo ayudar?";
+  var headerTitle = scriptTag.getAttribute("data-header-title") || "¿En qué te ayudamos?";
   var storageKey = "bsd_widget_visitor_id";
 
   function getVisitorId() {
@@ -91,7 +92,7 @@
   var panel = document.createElement("div");
   panel.id = "bsd-widget-panel";
   panel.innerHTML =
-    '<div id="bsd-widget-header"><span>¿En qué te ayudamos?</span>' +
+    '<div id="bsd-widget-header"><span>' + escapeHtml(headerTitle) + '</span>' +
     '<span id="bsd-widget-close">&times;</span></div>' +
     '<div id="bsd-widget-messages"></div>' +
     '<div id="bsd-widget-inputbar">' +
