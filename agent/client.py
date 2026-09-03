@@ -9,7 +9,7 @@ from services.memory import get_history as _load_history
 from services.memory import save_history as _save_history
 from services.sheets import get_customer_active_appointments
 
-MODEL = "claude-opus-4-7"
+MODEL = "claude-sonnet-5"
 MAX_TOKENS = 1024
 MAX_HISTORY_MESSAGES = 20
 
