@@ -21,6 +21,7 @@
 
   var apiBase = new URL(scriptTag.src).origin;
   var accentColor = scriptTag.getAttribute("data-color") || "#1f8a4c";
+  var greeting = scriptTag.getAttribute("data-greeting") || "¡Hola! 👋 ¿En qué te puedo ayudar?";
   var storageKey = "bsd_widget_visitor_id";
 
   function getVisitorId() {
@@ -137,11 +138,11 @@
         });
         renderedCount = mensajes.length;
         if (mensajes.length === 0) {
-          appendMessage("assistant", "¡Hola! 👋 ¿En qué te puedo ayudar?");
+          appendMessage("assistant", greeting);
         }
       })
       .catch(function () {
-        appendMessage("assistant", "¡Hola! 👋 ¿En qué te puedo ayudar?");
+        appendMessage("assistant", greeting);
       });
   }
 
