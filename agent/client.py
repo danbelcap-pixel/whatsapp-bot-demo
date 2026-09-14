@@ -30,21 +30,23 @@ _MESES = [
     "enero", "febrero", "marzo", "abril", "mayo", "junio", "julio",
     "agosto", "septiembre", "octubre", "noviembre", "diciembre",
 ]
-_ZONA_REFERENCIA = ZoneInfo("America/Mexico_City")
 
 
-def _fecha_actual_str() -> str:
+def _fecha_actual_str(zona: str = "America/Mexico_City") -> str:
     """Claude no sabe qué día es 'hoy' por su cuenta — sin esto, no puede
     convertir 'mañana', 'el viernes', 'en dos horas', etc. a una fecha real,
     y esas referencias relativas se quedarían guardadas tal cual en el
     horario de una cita, lo cual es ambiguo en cuanto pasa el tiempo (el
-    dueño del negocio puede leer el aviso horas o días después). Se usa
-    la hora del centro de México como referencia única y consistente,
-    aunque el negocio esté en otro huso horario del país."""
-    ahora = datetime.now(_ZONA_REFERENCIA)
+    dueño del negocio puede leer el aviso horas o días después). México
+    tiene varios husos horarios (Baja California, Sonora, etc. no están en
+    el del centro) — "zona" es el huso configurado para ESE negocio
+    (columna "Zona horaria" en Sheets), Ciudad de México por default."""
+    zona_info = ZoneInfo(zona)
+    ahora = datetime.now(zona_info)
     dia = _DIAS_SEMANA[ahora.weekday()]
     mes = _MESES[ahora.month - 1]
-    return f"{dia} {ahora.day} de {mes} de {ahora.year}, {ahora.strftime('%H:%M')} (hora del centro de México)"
+    nombre_zona = "hora del centro de México" if zona == "America/Mexico_City" else f"hora local, {zona}"
+    return f"{dia} {ahora.day} de {mes} de {ahora.year}, {ahora.strftime('%H:%M')} ({nombre_zona})"
 
 
 _client: Anthropic | None = None
@@ -218,7 +220,7 @@ ANNOUNCEMENT_TOOL = {
 }
 
 
-def interpret_owner_instruction(negocio: str, text: str) -> str | None:
+def interpret_owner_instruction(negocio: str, text: str, zona: str = "America/Mexico_City") -> str | None:
     """Le pregunta a Claude si este mensaje del DUEÑO es un aviso de cierre
     especial / cambio de horario. Devuelve el aviso redactado a guardar, o
     None si el mensaje no es eso."""
@@ -229,7 +231,7 @@ def interpret_owner_instruction(negocio: str, text: str) -> str | None:
             "type": "text",
             "text": (
                 f"Eres el asistente interno de {negocio}. Hoy es "
-                f"{_fecha_actual_str()}. Este mensaje viene "
+                f"{_fecha_actual_str(zona)}. Este mensaje viene "
                 f"del DUEÑO del negocio (no de un cliente). Si te está "
                 f"avisando de un cierre especial, cambio de horario "
                 f"temporal, una promoción de sus propios productos o "
@@ -267,6 +269,7 @@ def _system_prompt(
     objetivo: str = "",
     permite_citas: bool = True,
     es_canal_web: bool = False,
+    zona_horaria: str = "America/Mexico_City",
 ) -> str:
     info_texto = (
         f"\nINFORMACIÓN DE ESTE NEGOCIO — úsala para contestar preguntas de "
@@ -348,7 +351,7 @@ herramienta es que estás confirmando con el negocio y en breve avisas
     return f"""\
 Eres el asistente de atención al cliente de {negocio}, en {"el chat de su página web" if es_canal_web else "WhatsApp"}.
 
-Hoy es {_fecha_actual_str()}. Si el cliente usa una referencia relativa de
+Hoy es {_fecha_actual_str(zona_horaria)}. Si el cliente usa una referencia relativa de
 fecha u hora ("mañana", "el viernes", "en dos horas", "la próxima semana",
 "pasado mañana"), conviértela siempre tú mismo a una fecha absoluta usando
 la fecha de hoy como base, antes de decírsela de vuelta o de usarla en
@@ -453,6 +456,7 @@ def _call_claude(
     objetivo: str = "",
     permite_citas: bool = True,
     es_canal_web: bool = False,
+    zona_horaria: str = "America/Mexico_City",
     force_any_tool: bool = False,
 ) -> tuple[list[dict], str, dict | None]:
     """Llama a Claude y devuelve (content_serializable, texto, tool_use_block)."""
@@ -466,7 +470,7 @@ def _call_claude(
                 "text": _system_prompt(
                     negocio, info_negocio, citas_activas, aviso_negocio,
                     tono=tono, objetivo=objetivo, permite_citas=permite_citas,
-                    es_canal_web=es_canal_web,
+                    es_canal_web=es_canal_web, zona_horaria=zona_horaria,
                 ),
                 "cache_control": {"type": "ephemeral"},
             }
@@ -522,6 +526,7 @@ def ask_agent(
     tono = business.get("tono", "")
     objetivo = business.get("objetivo", "")
     permite_citas = business.get("agenda_citas", True)
+    zona_horaria = business.get("zona_horaria", "America/Mexico_City")
     # El chat de página web usa el mismo formato de wa_id que se define en
     # main.py (WEB_VISITOR_PREFIX = "web:") — si ese prefijo cambia allá,
     # hay que actualizarlo aquí también.
@@ -536,6 +541,7 @@ def ask_agent(
     content, text, tool_block = _call_claude(
         negocio, info_negocio, history, citas_activas, aviso_negocio,
         tono=tono, objetivo=objetivo, permite_citas=permite_citas, es_canal_web=es_canal_web,
+        zona_horaria=zona_horaria,
     )
     history.append({"role": "assistant", "content": content})
 
@@ -550,7 +556,7 @@ def ask_agent(
         retry_content, _, retry_tool_block = _call_claude(
             negocio, info_negocio, history[:-1], citas_activas, aviso_negocio,
             tono=tono, objetivo=objetivo, permite_citas=permite_citas,
-            es_canal_web=es_canal_web, force_any_tool=True,
+            es_canal_web=es_canal_web, zona_horaria=zona_horaria, force_any_tool=True,
         )
         if retry_tool_block:
             content, tool_block = retry_content, retry_tool_block

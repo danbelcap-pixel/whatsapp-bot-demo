@@ -29,8 +29,11 @@ from services.sheets import (
     list_pending_appointments,
     log_event,
     mark_appointment_resolved,
+    update_appointment_calendar_event_id,
     update_appointment_horario,
 )
+from services.calendar import create_event as create_calendar_event
+from services.calendar import delete_event as delete_calendar_event
 
 WEB_VISITOR_PREFIX = "web:"
 WIDGET_MAX_MESSAGE_LENGTH = 2000
@@ -356,6 +359,34 @@ def _notify_customer(
         send_whatsapp_template(business, customer_id, template_name, template_params)
 
 
+def _add_to_calendar_if_configured(business: dict, req: dict) -> None:
+    """Si el negocio compartió su Google Calendar (columna configurada en
+    Sheets), agrega la cita recién confirmada como evento — nunca bloquea
+    ni falla la confirmación en sí si algo sale mal aquí."""
+    calendar_id = business.get("google_calendar_id")
+    if not calendar_id:
+        return
+    negocio_texto = f"\nNegocio del cliente: {req['negocio_cliente']}" if req.get("negocio_cliente") else ""
+    event_id = create_calendar_event(
+        calendar_id,
+        resumen=f"{req['servicio']} — {req['nombre']}",
+        descripcion=f"Folio #{req['folio']}\nCliente: {req['nombre']}{negocio_texto}",
+        horario_texto=req["horario"],
+        zona=business.get("zona_horaria", "America/Mexico_City"),
+    )
+    if event_id:
+        update_appointment_calendar_event_id(business["name"], req["row_number"], event_id)
+
+
+def _remove_from_calendar_if_any(business: dict, cita: dict) -> None:
+    """Borra el evento de Calendar de una cita que ya estaba confirmada, si
+    es que llegó a crearse uno — al cancelarla o moverla de horario."""
+    calendar_id = business.get("google_calendar_id")
+    event_id = cita.get("google_event_id")
+    if calendar_id and event_id:
+        delete_calendar_event(calendar_id, event_id)
+
+
 def _resolve_citas_reply(business: dict, req: dict, reply_text: str) -> None:
     """Aplica la respuesta del dueño (SI/NO/horario alternativo) a una
     solicitud de cita específica ya identificada sin ambigüedad."""
@@ -375,6 +406,7 @@ def _resolve_citas_reply(business: dict, req: dict, reply_text: str) -> None:
         )
         mark_appointment_resolved(negocio, req["row_number"], "confirmada")
         log_event(negocio, "cita_confirmada")
+        _add_to_calendar_if_configured(business, req)
     elif reply_normalized == "no":
         _notify_customer(
             business, req["customer_wa_id"],
@@ -445,7 +477,7 @@ def handle_owner_reply(business: dict, text: str) -> None:
     # ambiguo entre "propuesta de horario para la única pendiente" y "aviso
     # de negocio" (cierre, cambio de horario). No se asume, se le pregunta
     # a Claude qué es en realidad.
-    aviso = interpret_owner_instruction(negocio, text)
+    aviso = interpret_owner_instruction(negocio, text, business.get("zona_horaria", "America/Mexico_City"))
     if aviso:
         save_business_notice(business["business_id"], aviso)
         _reply_to_owner(business, f'Anotado — les voy a avisar a los clientes: "{aviso}"')
@@ -636,11 +668,15 @@ def _handle_agent_action(business: dict, wa_id: str, action: dict) -> None:
             )
         elif action["type"] == "cancelar":
             mark_appointment_resolved(business["name"], cita["row_number"], "cancelada_por_cliente")
+            _remove_from_calendar_if_any(business, cita)
             notify_owner_cancellation(business, cita)
             log_event(business["name"], "cita_cancelada")
         else:  # modificar
             update_appointment_horario(business["name"], cita["row_number"], action["nuevo_horario"])
             mark_appointment_resolved(business["name"], cita["row_number"], "pendiente")  # requiere reconfirmar
+            # Se borra el evento viejo — si se reconfirma con el nuevo horario,
+            # _add_to_calendar_if_configured crea uno nuevo en ese momento.
+            _remove_from_calendar_if_any(business, cita)
             notify_owner_modification(business, cita, action["nuevo_horario"])
             log_event(business["name"], "cita_modificada")
 

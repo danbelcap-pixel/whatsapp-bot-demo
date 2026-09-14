@@ -37,7 +37,7 @@ EVENT_COLUMN = {
     "lead_registrado": 11,
 }
 
-CITAS_HEADERS = ["Folio", "Fecha", "customer_wa_id", "nombre", "servicio", "horario", "estado", "correo", "negocio_cliente"]
+CITAS_HEADERS = ["Folio", "Fecha", "customer_wa_id", "nombre", "servicio", "horario", "estado", "correo", "negocio_cliente", "Google Event ID"]
 _INACTIVE_STATES = ("rechazada", "cancelada_por_cliente")
 
 # Pestaña de control con un renglón por negocio dado de alta — permite que
@@ -49,7 +49,7 @@ CLIENTES_HEADERS = [
     "Phone Number ID", "Nombre del negocio", "Teléfono del dueño",
     "Teléfonos adicionales", "Activo", "Información del negocio",
     "Tono del bot", "Objetivo del bot", "Agenda citas", "Widget ID",
-    "Telegram Chat ID",
+    "Telegram Chat ID", "Google Calendar ID", "Zona horaria",
 ]
 
 
@@ -200,6 +200,7 @@ def _row_to_appointment(row: list, row_number: int) -> dict:
         "estado": row[6] if len(row) > 6 else "",
         "correo": row[7] if len(row) > 7 else "",
         "negocio_cliente": row[8] if len(row) > 8 else "",
+        "google_event_id": row[9] if len(row) > 9 else "",
     }
 
 
@@ -258,7 +259,7 @@ def add_pending_appointment(business_name: str, customer_wa_id: str, req: dict) 
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         row = [
             folio, timestamp, customer_wa_id, req["nombre"], req["servicio"], req["horario"],
-            "pendiente", req.get("correo", ""), req.get("negocio_cliente", ""),
+            "pendiente", req.get("correo", ""), req.get("negocio_cliente", ""), "",
         ]
         _values_append(sheet_id, f"'{tab}'!A1", [row])
         return folio
@@ -276,7 +277,7 @@ def get_pending_appointment_by_folio(business_name: str, folio: int) -> dict | N
     try:
         tab = _citas_tab_name(business_name)
         _ensure_tab_exists(sheet_id, tab, CITAS_HEADERS)
-        rows = _values_get(sheet_id, f"'{tab}'!A2:I")
+        rows = _values_get(sheet_id, f"'{tab}'!A2:J")
         for i, row in enumerate(rows, start=2):
             if len(row) >= 7 and row[6] == "pendiente" and str(row[0]) == str(folio):
                 return _row_to_appointment(row, i)
@@ -295,7 +296,7 @@ def list_pending_appointments(business_name: str) -> list[dict]:
     try:
         tab = _citas_tab_name(business_name)
         _ensure_tab_exists(sheet_id, tab, CITAS_HEADERS)
-        rows = _values_get(sheet_id, f"'{tab}'!A2:I")
+        rows = _values_get(sheet_id, f"'{tab}'!A2:J")
         return [
             _row_to_appointment(row, i)
             for i, row in enumerate(rows, start=2)
@@ -316,7 +317,7 @@ def get_customer_active_appointments(business_name: str, wa_id: str) -> list[dic
     try:
         tab = _citas_tab_name(business_name)
         _ensure_tab_exists(sheet_id, tab, CITAS_HEADERS)
-        rows = _values_get(sheet_id, f"'{tab}'!A2:I")
+        rows = _values_get(sheet_id, f"'{tab}'!A2:J")
         return [
             _row_to_appointment(row, i)
             for i, row in enumerate(rows, start=2)
@@ -337,7 +338,7 @@ def get_appointment_by_folio(business_name: str, folio: int) -> dict | None:
     try:
         tab = _citas_tab_name(business_name)
         _ensure_tab_exists(sheet_id, tab, CITAS_HEADERS)
-        rows = _values_get(sheet_id, f"'{tab}'!A2:I")
+        rows = _values_get(sheet_id, f"'{tab}'!A2:J")
         for i, row in enumerate(rows, start=2):
             if len(row) >= 7 and str(row[0]) == str(folio):
                 return _row_to_appointment(row, i)
@@ -357,6 +358,20 @@ def update_appointment_horario(business_name: str, row_number: int, nuevo_horari
         _values_update(sheet_id, f"'{tab}'!F{row_number}", [[nuevo_horario]])
     except Exception:
         log.exception("No se pudo actualizar el horario de la cita en Google Sheets")
+
+
+def update_appointment_calendar_event_id(business_name: str, row_number: int, event_id: str) -> None:
+    """Guarda (o borra, si event_id es "") el ID del evento de Google
+    Calendar creado para esta cita — se necesita después para poder
+    actualizarlo o eliminarlo si la cita se cancela o se mueve de horario."""
+    sheet_id = os.getenv("GOOGLE_SHEET_ID")
+    if not sheet_id:
+        return
+    try:
+        tab = _citas_tab_name(business_name)
+        _values_update(sheet_id, f"'{tab}'!J{row_number}", [[event_id]])
+    except Exception:
+        log.exception("No se pudo guardar el Google Event ID de la cita en Sheets")
 
 
 def mark_appointment_resolved(business_name: str, row_number: int, estado: str) -> None:
@@ -409,6 +424,11 @@ def _row_to_business_config(row: list) -> dict | None:
         "agenda_citas": agenda_citas not in ("NO", "FALSE", "0"),
         "widget_id": widget_id,
         "telegram_chat_id": telegram_chat_id,
+        "google_calendar_id": row[11].strip() if len(row) > 11 else "",
+        # IANA (ej. "America/Tijuana", "America/Hermosillo") — el país tiene
+        # varios husos horarios, no se puede asumir "hora del centro de
+        # México" para todos. Vacío = usa America/Mexico_City por default.
+        "zona_horaria": row[12].strip() if len(row) > 12 and row[12].strip() else "America/Mexico_City",
     }
 
 
@@ -423,7 +443,7 @@ def get_business_config_row(phone_number_id: str) -> dict | None:
         return None
     try:
         _ensure_tab_exists(sheet_id, CLIENTES_TAB, CLIENTES_HEADERS)
-        rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:K")
+        rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:M")
         for row in rows:
             if len(row) >= 1 and row[0].strip() == phone_number_id:
                 return _row_to_business_config(row)
@@ -442,7 +462,7 @@ def get_business_config_by_widget_id(widget_id: str) -> dict | None:
         return None
     try:
         _ensure_tab_exists(sheet_id, CLIENTES_TAB, CLIENTES_HEADERS)
-        rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:K")
+        rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:M")
         for row in rows:
             if len(row) > 9 and row[9].strip() == widget_id:
                 return _row_to_business_config(row)
@@ -462,7 +482,7 @@ def get_business_config_by_telegram_chat_id(chat_id: str) -> dict | None:
         return None
     try:
         _ensure_tab_exists(sheet_id, CLIENTES_TAB, CLIENTES_HEADERS)
-        rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:K")
+        rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:M")
         for row in rows:
             if len(row) > 10 and row[10].strip() == str(chat_id):
                 return _row_to_business_config(row)
