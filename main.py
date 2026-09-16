@@ -515,7 +515,7 @@ def _verify_webhook_signature(payload_body: bytes, signature_header: str | None)
     return hmac.compare_digest(expected, received)
 
 
-_last_messenger_payload = None  # DEBUG TEMPORAL — quitar junto con las rutas de abajo en cuanto termine la prueba de Marketplace/m.me
+_last_messenger_payloads = []  # DEBUG TEMPORAL — quitar junto con las rutas de abajo en cuanto termine la prueba de Marketplace/m.me
 
 
 @app.get("/messenger-webhook")
@@ -540,13 +540,13 @@ def receive_messenger_event():
     """DEBUG TEMPORAL — solo para la prueba de si el ref de un link m.me
     llega limpio. No procesa nada todavía, solo guarda el payload crudo
     para inspeccionarlo."""
-    global _last_messenger_payload
     if not _verify_webhook_signature(request.get_data(), request.headers.get("X-Hub-Signature-256")):
         log.warning("Firma de webhook de Messenger inválida o ausente — request rechazado.")
         return "Forbidden", 403
 
     payload = request.get_json(silent=True) or {}
-    _last_messenger_payload = payload
+    _last_messenger_payloads.append(payload)
+    del _last_messenger_payloads[:-10]  # guarda solo los últimos 10
     log.info(f"Evento de Messenger recibido: {payload}")
     return "EVENT_RECEIVED", 200
 
@@ -554,8 +554,10 @@ def receive_messenger_event():
 @app.get("/messenger-webhook/last")
 def see_last_messenger_payload():
     """DEBUG TEMPORAL — para revisar rápido qué llegó, sin tener que buscar
-    en los logs de Render."""
-    return jsonify(_last_messenger_payload or {"info": "Todavía no ha llegado ningún evento."})
+    en los logs de Render. Muestra los últimos eventos, no solo el más
+    reciente, porque Meta a veces manda el aviso de "referral" en un
+    evento separado del mensaje."""
+    return jsonify(_last_messenger_payloads or {"info": "Todavía no ha llegado ningún evento."})
 
 
 @app.get("/webhook")
