@@ -515,6 +515,49 @@ def _verify_webhook_signature(payload_body: bytes, signature_header: str | None)
     return hmac.compare_digest(expected, received)
 
 
+_last_messenger_payload = None  # DEBUG TEMPORAL — quitar junto con las rutas de abajo en cuanto termine la prueba de Marketplace/m.me
+
+
+@app.get("/messenger-webhook")
+def verify_messenger_webhook():
+    """Verificación de Meta para el webhook de Messenger — mismo mecanismo
+    que el de WhatsApp, reutiliza el mismo verify token."""
+    mode = request.args.get("hub.mode")
+    token = request.args.get("hub.verify_token")
+    challenge = request.args.get("hub.challenge")
+
+    expected_token = os.getenv("WHATSAPP_VERIFY_TOKEN")
+    if mode == "subscribe" and expected_token and token and hmac.compare_digest(token, expected_token):
+        log.info("Webhook de Messenger verificado por Meta.")
+        return challenge, 200
+
+    log.warning("Verificación de webhook de Messenger fallida (token no coincide).")
+    return "Forbidden", 403
+
+
+@app.post("/messenger-webhook")
+def receive_messenger_event():
+    """DEBUG TEMPORAL — solo para la prueba de si el ref de un link m.me
+    llega limpio. No procesa nada todavía, solo guarda el payload crudo
+    para inspeccionarlo."""
+    global _last_messenger_payload
+    if not _verify_webhook_signature(request.get_data(), request.headers.get("X-Hub-Signature-256")):
+        log.warning("Firma de webhook de Messenger inválida o ausente — request rechazado.")
+        return "Forbidden", 403
+
+    payload = request.get_json(silent=True) or {}
+    _last_messenger_payload = payload
+    log.info(f"Evento de Messenger recibido: {payload}")
+    return "EVENT_RECEIVED", 200
+
+
+@app.get("/messenger-webhook/last")
+def see_last_messenger_payload():
+    """DEBUG TEMPORAL — para revisar rápido qué llegó, sin tener que buscar
+    en los logs de Render."""
+    return jsonify(_last_messenger_payload or {"info": "Todavía no ha llegado ningún evento."})
+
+
 @app.get("/webhook")
 def verify_webhook():
     mode = request.args.get("hub.mode")
