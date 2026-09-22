@@ -9,7 +9,7 @@ import requests
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 
-from agent.client import ask_agent, interpret_owner_instruction
+from agent.client import ask_agent, interpret_owner_citas_reply, interpret_owner_instruction
 from services.business import (
     get_business_config,
     get_business_config_by_telegram,
@@ -474,22 +474,43 @@ def handle_owner_reply(business: dict, text: str) -> None:
 
     pending = list_pending_appointments(negocio)
     is_exact_reply = text.lower() in ("si", "sí", "yes", "ok", "dale", "no")
+    zona = business.get("zona_horaria", "America/Mexico_City")
 
     if pending and len(pending) == 1 and is_exact_reply:
         # Único caso simple e inequívoco sin necesitar folio ni Claude.
         _resolve_citas_reply(business, pending[0], text)
         return
 
-    if pending and len(pending) > 1 and is_exact_reply:
-        # SI/NO sin folio con varias pendientes — no se adivina cuál.
+    if pending and len(pending) > 1:
+        if is_exact_reply:
+            # Un "si"/"no" puro con varias pendientes no dice a cuál se
+            # refiere — no hay nada que Claude pueda relacionar tampoco.
+            _send_pending_list_prompt(business, pending)
+            return
+        # Respuesta en lenguaje natural con varias solicitudes pendientes
+        # (ej. "si confirmo la cita de las 6 para Daniel", "cita 6 si").
+        # Además del formato explícito '#N SI', se le da a Claude la lista
+        # REAL de pendientes para que identifique sin ambigüedad a cuál se
+        # refiere — si no está seguro, no adivina y se cae al mismo aviso
+        # de siempre pidiendo el folio.
+        match = interpret_owner_citas_reply(negocio, text, pending, zona)
+        if match:
+            req = get_pending_appointment_by_folio(negocio, match["folio"])
+            if req:
+                reply_for_resolve = {
+                    "confirmar": "si",
+                    "rechazar": "no",
+                }.get(match["decision"], match.get("nuevo_horario") or text)
+                _resolve_citas_reply(business, req, reply_for_resolve)
+                return
         _send_pending_list_prompt(business, pending)
         return
 
-    # Aquí el texto no es un SI/NO limpio (o no hay nada pendiente) — es
-    # ambiguo entre "propuesta de horario para la única pendiente" y "aviso
-    # de negocio" (cierre, cambio de horario). No se asume, se le pregunta
-    # a Claude qué es en realidad.
-    aviso = interpret_owner_instruction(negocio, text, business.get("zona_horaria", "America/Mexico_City"))
+    # Aquí no hay más de una pendiente (0 o 1) y el texto no es un SI/NO
+    # limpio — es ambiguo entre "propuesta de horario para la única
+    # pendiente" y "aviso de negocio" (cierre, cambio de horario). No se
+    # asume, se le pregunta a Claude qué es en realidad.
+    aviso = interpret_owner_instruction(negocio, text, zona)
     if aviso:
         save_business_notice(business["business_id"], aviso)
         _reply_to_owner(business, f'Anotado — les voy a avisar a los clientes: "{aviso}"')
@@ -503,10 +524,8 @@ def handle_owner_reply(business: dict, text: str) -> None:
             "Si quieres avisar de un cierre especial o cambio de horario, "
             "dime algo como 'mañana cerraremos' o 'el jueves cerramos a las 2pm'.",
         )
-    elif len(pending) == 1:
-        _resolve_citas_reply(business, pending[0], text)
     else:
-        _send_pending_list_prompt(business, owner, pending)
+        _resolve_citas_reply(business, pending[0], text)
 
 
 def _verify_webhook_signature(payload_body: bytes, signature_header: str | None) -> bool:

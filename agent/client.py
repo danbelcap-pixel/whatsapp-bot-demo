@@ -260,6 +260,124 @@ def interpret_owner_instruction(negocio: str, text: str, zona: str = "America/Me
     return tool_block["input"]["aviso"] if tool_block else None
 
 
+def _pending_citas_tool(pending: list[dict]) -> dict:
+    folios = ", ".join(str(p["folio"]) for p in pending)
+    return {
+        "name": "resolver_solicitud_pendiente",
+        "description": (
+            "Identifica a cuál solicitud de cita PENDIENTE se refiere el "
+            "mensaje del dueño, y qué decidió. Úsala SOLO si no tienes "
+            "ninguna duda de a cuál de las solicitudes listadas se refiere "
+            "Y de qué decidió — si el mensaje podría aplicar a más de una, "
+            "o no queda claro si confirma, rechaza o propone otro horario, "
+            f"NO la uses, mejor no arriesgarte a adivinar. Folios "
+            f"pendientes válidos ahora mismo: {folios}."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "folio": {
+                    "type": "integer",
+                    "description": "El folio EXACTO, tomado de la lista de pendientes, al que se refiere el mensaje.",
+                },
+                "decision": {
+                    "type": "string",
+                    "enum": ["confirmar", "rechazar", "otro_horario"],
+                    "description": (
+                        "confirmar: el dueño acepta la cita tal cual se "
+                        "pidió. rechazar: el dueño la rechaza/cancela. "
+                        "otro_horario: el dueño propone un horario distinto "
+                        "al solicitado."
+                    ),
+                },
+                "nuevo_horario": {
+                    "type": "string",
+                    "description": (
+                        "Solo si decision='otro_horario': el horario nuevo "
+                        "propuesto, convertido a fecha absoluta sin "
+                        "ambigüedad (ej. 'viernes 6 de septiembre a las "
+                        "4pm'), nunca una referencia relativa."
+                    ),
+                },
+            },
+            "required": ["folio", "decision"],
+        },
+    }
+
+
+def interpret_owner_citas_reply(
+    negocio: str, text: str, pending: list[dict], zona: str = "America/Mexico_City"
+) -> dict | None:
+    """Le pregunta a Claude a cuál solicitud pendiente se refiere una
+    respuesta del dueño en lenguaje natural (ej. 'si confirmo la cita de
+    las 6 para Daniel', 'cita 6 si'), dándole la lista real de pendientes
+    (folio, nombre, servicio, horario) como único contexto para que pueda
+    relacionarlos — nunca adivinando a partir de un número suelto en el
+    texto.
+
+    Devuelve None si Claude no está seguro (mensaje ambiguo entre varias
+    pendientes, o intención poco clara) — en ese caso quien llama debe
+    caer al flujo de siempre (pedir el folio explícito con '#N SI'), nunca
+    adivinar. Este es un permiso ADICIONAL a ese formato, no lo reemplaza:
+    si Claude duda, el resultado es exactamente el mismo que sin esta
+    función."""
+    if not pending:
+        return None
+    lista = "\n".join(
+        f"- Folio #{p['folio']}: {p['nombre']}, {p['servicio']}, {p['horario']}"
+        for p in pending
+    )
+    message = get_client().messages.create(
+        model=MODEL,
+        # No usar 300 aquí (como interpret_owner_instruction): este modelo
+        # razona con "thinking" por defecto, y con un tope bajo se puede
+        # quedar sin espacio para llegar a usar la herramienta — el
+        # resultado sería un falso "no está seguro" por corte de tokens,
+        # no por ambigüedad real.
+        max_tokens=MAX_TOKENS,
+        system=[{
+            "type": "text",
+            "text": (
+                f"Eres el asistente interno de {negocio}. Hoy es "
+                f"{_fecha_actual_str(zona)}. Este mensaje viene del DUEÑO "
+                f"del negocio, respondiendo a un aviso de solicitudes de "
+                f"cita pendientes. Estas son las solicitudes pendientes "
+                f"ahora mismo:\n\n{lista}\n\n"
+                f"El dueño casi siempre escribe desde el celular sin "
+                f"acentos: en este contexto (una respuesta a un aviso de "
+                f"citas pendientes), un mensaje que empieza con 'si' casi "
+                f"siempre significa 'sí' (confirmación), no la conjunción "
+                f"condicional 'si' de una oración hipotética — trátalo "
+                f"como confirmación salvo que el mensaje sea claramente una "
+                f"pregunta o plantee una condición real que el negocio "
+                f"tendría que cumplir primero (ej. 'si me haces un "
+                f"descuento, confirmo').\n\n"
+                f"Si el mensaje del dueño se refiere CLARAMENTE a una sola "
+                f"de estas (por horario, nombre del cliente, servicio, o "
+                f"folio mencionado en el texto) y su intención es clara "
+                f"(confirmar, rechazar, o proponer otro horario), usa la "
+                f"herramienta resolver_solicitud_pendiente. Si hay "
+                f"CUALQUIER duda de a cuál se refiere, o de qué decidió, "
+                f"NO uses ninguna herramienta — es preferible no resolver "
+                f"nada a resolver la solicitud equivocada."
+            ),
+        }],
+        tools=[_pending_citas_tool(pending)],
+        messages=[{"role": "user", "content": text}],
+    )
+    content = [block.model_dump() for block in message.content]
+    tool_block = next((b for b in content if b.get("type") == "tool_use"), None)
+    if not tool_block:
+        return None
+    result = tool_block["input"]
+    valid_folios = {p["folio"] for p in pending}
+    if result.get("folio") not in valid_folios:
+        # Blindaje extra: si Claude devolviera un folio que no está en la
+        # lista real (no debería pasar), se ignora en vez de confiar ciegamente.
+        return None
+    return result
+
+
 def _system_prompt(
     negocio: str,
     info_negocio: str,
