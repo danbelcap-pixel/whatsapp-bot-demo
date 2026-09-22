@@ -359,10 +359,16 @@ def _notify_customer(
         send_whatsapp_template(business, customer_id, template_name, template_params)
 
 
-def _add_to_calendar_if_configured(business: dict, req: dict) -> None:
+def _add_to_calendar_if_configured(business: dict, req: dict, pendiente: bool = False) -> None:
     """Si el negocio compartió su Google Calendar (columna configurada en
-    Sheets), agrega la cita recién confirmada como evento — nunca bloquea
-    ni falla la confirmación en sí si algo sale mal aquí."""
+    Sheets), agrega la cita como evento — nunca bloquea ni falla la acción
+    en sí si algo sale mal aquí.
+
+    "pendiente=True" se usa desde que el cliente PIDE la cita (todavía sin
+    aprobar) — así el dueño ve la solicitud con solo mirar su calendario,
+    sin depender de que no se le pase ningún aviso de WhatsApp/Telegram.
+    Cuando el dueño confirma, se borra ese evento pendiente y se crea uno
+    nuevo sin la marca (ver _resolve_citas_reply)."""
     calendar_id = business.get("google_calendar_id")
     if not calendar_id:
         return
@@ -373,6 +379,7 @@ def _add_to_calendar_if_configured(business: dict, req: dict) -> None:
         descripcion=f"Folio #{req['folio']}\nCliente: {req['nombre']}{negocio_texto}",
         horario_texto=req["horario"],
         zona=business.get("zona_horaria", "America/Mexico_City"),
+        pendiente=pendiente,
     )
     if event_id:
         update_appointment_calendar_event_id(business["name"], req["row_number"], event_id)
@@ -406,7 +413,11 @@ def _resolve_citas_reply(business: dict, req: dict, reply_text: str) -> None:
         )
         mark_appointment_resolved(negocio, req["row_number"], "confirmada")
         log_event(negocio, "cita_confirmada")
-        _add_to_calendar_if_configured(business, req)
+        # Se borra el evento "⏳ Pendiente" (si se creó desde que se pidió
+        # la cita) y se crea uno nuevo sin la marca — así no quedan dos
+        # eventos del mismo folio en el calendario.
+        _remove_from_calendar_if_any(business, req)
+        _add_to_calendar_if_configured(business, req, pendiente=False)
     elif reply_normalized == "no":
         _notify_customer(
             business, req["customer_wa_id"],
@@ -416,6 +427,7 @@ def _resolve_citas_reply(business: dict, req: dict, reply_text: str) -> None:
         )
         mark_appointment_resolved(negocio, req["row_number"], "rechazada")
         log_event(negocio, "cita_rechazada")
+        _remove_from_calendar_if_any(business, req)
     else:
         # El dueño escribió un horario alternativo en texto libre
         _notify_customer(
@@ -699,6 +711,13 @@ def _handle_agent_action(business: dict, wa_id: str, action: dict) -> None:
         action["customer_wa_id"] = wa_id
         notify_owner_new_request(business, action, folio)
         log_event(business["name"], "cita_solicitada")
+        if folio:
+            # add_pending_appointment siempre agrega la fila justo después
+            # de las ya existentes, así que su número de fila es el folio
+            # + 1 (la fila 2 es el folio 1, la fila 3 el folio 2, etc.).
+            action["folio"] = folio
+            action["row_number"] = folio + 1
+            _add_to_calendar_if_configured(business, action, pendiente=True)
 
     elif action["type"] in ("cancelar", "modificar"):
         # Verificación de seguridad: el folio debe pertenecer a QUIEN
@@ -719,10 +738,17 @@ def _handle_agent_action(business: dict, wa_id: str, action: dict) -> None:
         else:  # modificar
             update_appointment_horario(business["name"], cita["row_number"], action["nuevo_horario"])
             mark_appointment_resolved(business["name"], cita["row_number"], "pendiente")  # requiere reconfirmar
-            # Se borra el evento viejo — si se reconfirma con el nuevo horario,
-            # _add_to_calendar_if_configured crea uno nuevo en ese momento.
-            _remove_from_calendar_if_any(business, cita)
+            # Ojo: notify_owner_modification necesita el horario ANTERIOR
+            # (todavía en cita["horario"]) — se manda antes de tocar ese
+            # campo, para no pisarlo.
             notify_owner_modification(business, cita, action["nuevo_horario"])
+            # Se borra el evento viejo (con el horario anterior) y se crea
+            # uno nuevo "⏳ Pendiente" con el horario nuevo — así el
+            # calendario nunca se queda sin reflejar la solicitud mientras
+            # se espera la reconfirmación del dueño.
+            _remove_from_calendar_if_any(business, cita)
+            cita["horario"] = action["nuevo_horario"]
+            _add_to_calendar_if_configured(business, cita, pendiente=True)
             log_event(business["name"], "cita_modificada")
 
     elif action["type"] == "lead":

@@ -95,13 +95,18 @@ def _parse_horario(horario: str, zona: str = "America/Mexico_City", ahora: datet
 
 def create_event(
     calendar_id: str, resumen: str, descripcion: str, horario_texto: str,
-    zona: str = "America/Mexico_City",
+    zona: str = "America/Mexico_City", pendiente: bool = False,
 ) -> str | None:
     """Crea el evento en el calendario del negocio. Devuelve el ID del
     evento creado (para poder borrarlo/actualizarlo después), o None si no
     se pudo crear (calendario no compartido, horario no interpretable,
     etc.) — nunca lanza excepción, un fallo aquí no debe tumbar la
-    confirmación de la cita en sí."""
+    confirmación de la cita en sí.
+
+    "pendiente=True" marca el evento como una solicitud que todavía espera
+    aprobación del dueño (título con "⏳ Pendiente" y color distinto) — así
+    el dueño ve TODO con solo mirar su calendario, sin depender de que no
+    se le pase ningún aviso de WhatsApp/Telegram."""
     headers = _auth_headers()
     if not headers or not calendar_id:
         return None
@@ -113,11 +118,13 @@ def create_event(
     fin = inicio + timedelta(hours=1)
 
     body = {
-        "summary": resumen,
+        "summary": f"⏳ Pendiente — {resumen}" if pendiente else resumen,
         "description": descripcion,
         "start": {"dateTime": inicio.isoformat(), "timeZone": zona},
         "end": {"dateTime": fin.isoformat(), "timeZone": zona},
     }
+    if pendiente:
+        body["colorId"] = "5"  # amarillo ("Banana") — distingue lo pendiente de lo confirmado
     try:
         resp = requests.post(
             f"{CALENDAR_API}/calendars/{requests.utils.quote(calendar_id, safe='')}/events",
