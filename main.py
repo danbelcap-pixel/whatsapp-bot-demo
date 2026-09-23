@@ -29,6 +29,7 @@ from services.sheets import (
     list_pending_appointments,
     log_event,
     mark_appointment_resolved,
+    search_citas_by_query,
     update_appointment_calendar_event_id,
     update_appointment_horario,
 )
@@ -450,9 +451,106 @@ def _send_pending_list_prompt(business: dict, pending: list[dict]) -> None:
     )
 
 
+def _wa_id_legible(wa_id: str) -> str:
+    """Versión corta y segura de mostrar un wa_id en un mensaje al dueño —
+    nunca el número completo en la lista de candidatos (para desambiguar
+    alcanza con los últimos dígitos), y una etiqueta clara si es un
+    visitante del chat de la página web en vez de un número real."""
+    if wa_id.startswith(WEB_VISITOR_PREFIX):
+        return "chat de la página web"
+    return f"WhatsApp ...{wa_id[-4:]}" if len(wa_id) >= 4 else f"WhatsApp {wa_id}"
+
+
+def _send_historial_conversacion(business: dict, cliente: dict) -> None:
+    history = get_history(business["business_id"], cliente["customer_wa_id"])
+    mensajes = _extract_visible_messages(history)
+    if not mensajes:
+        _reply_to_owner(
+            business,
+            f"No tengo conversación guardada de {cliente['nombre']} — el "
+            f"historial se guarda solo por 3 días, así que si fue hace más "
+            f"tiempo ya no está disponible.",
+        )
+        return
+
+    lineas = [f"Historial con {cliente['nombre']} ({_wa_id_legible(cliente['customer_wa_id'])}):\n"]
+    for m in mensajes:
+        quien = "Cliente" if m["role"] == "user" else "Bot"
+        lineas.append(f"{quien}: {m['text']}")
+    transcripcion = "\n\n".join(lineas)
+
+    # Telegram/WhatsApp tienen límite de longitud por mensaje — mejor un
+    # historial recortado a lo más reciente que un envío que falle entero.
+    if len(transcripcion) > 3500:
+        transcripcion = (
+            "(...recortado, se muestra solo lo más reciente...)\n\n"
+            + transcripcion[-3500:]
+        )
+    _reply_to_owner(business, transcripcion)
+
+
+def _handle_historial_request(business: dict, query: str) -> None:
+    negocio = business["name"]
+
+    # "historial #12" — folio exacto, típicamente al desempatar una lista
+    # de homónimos. Siempre resuelve a un cliente único, sin ambigüedad.
+    folio_match = re.match(r"^#?(\d+)$", query.strip())
+    if folio_match:
+        cita = get_appointment_by_folio(negocio, int(folio_match.group(1)))
+        if not cita:
+            _reply_to_owner(
+                business,
+                f"No encontré ninguna cita con el folio #{folio_match.group(1)}.",
+            )
+            return
+        _send_historial_conversacion(business, cita)
+        return
+
+    candidatos = search_citas_by_query(negocio, query)
+
+    if not candidatos:
+        _reply_to_owner(
+            business,
+            f'No encontré ningún cliente que coincida con "{query}" en los '
+            f"registros de citas. Prueba con el nombre completo o el "
+            f"número de WhatsApp.\n\n(Ojo: solo encuentro clientes que ya "
+            f"pidieron una cita alguna vez — si solo platicó con el bot sin "
+            f"agendar nada, no lo puedo buscar por nombre.)",
+        )
+        return
+
+    if len(candidatos) > 1:
+        # Varios clientes distintos coinciden (posibles homónimos) — nunca
+        # se adivina cuál. Se desempata por folio (siempre existe y es
+        # único, a diferencia del número de WhatsApp: un cliente del chat
+        # de la página web no tiene uno real que pueda dar).
+        lista = "\n".join(
+            f"- #{c['folio']} {c['nombre']} ({_wa_id_legible(c['customer_wa_id'])}) — "
+            f"última cita: {c['servicio']}, {c['horario']}"
+            for c in candidatos
+        )
+        _reply_to_owner(
+            business,
+            f'Encontré {len(candidatos)} clientes que coinciden con "{query}" '
+            f"— contesta \"historial #<folio>\" del que te interese "
+            f"(ej. \"historial #{candidatos[0]['folio']}\"):\n\n{lista}",
+        )
+        return
+
+    _send_historial_conversacion(business, candidatos[0])
+
+
 def handle_owner_reply(business: dict, text: str) -> None:
     negocio = business["name"]
     text = text.strip()
+
+    # Comando para que el dueño pida ver una conversación pasada — antes de
+    # cualquier otra interpretación, porque "historial ..." no se parece a
+    # un folio ni a un SI/NO.
+    historial_match = re.match(r"^historial[:\s]+(.+)$", text, re.IGNORECASE)
+    if historial_match:
+        _handle_historial_request(business, historial_match.group(1).strip())
+        return
 
     # Formato estricto y explícito para referenciar un folio: '#3 SI'.
     # A propósito NO se busca cualquier número suelto en el texto — una
@@ -877,9 +975,16 @@ def widget_history():
 
     wa_id = f"{WEB_VISITOR_PREFIX}{visitor_id}"
     history = get_history(business["business_id"], wa_id)
+    mensajes = _extract_visible_messages(history)
 
-    # El historial guardado incluye bloques internos (tool_use/tool_result)
-    # que no le sirven al frontend — solo el texto visible para humanos.
+    return _widget_cors(jsonify({"messages": mensajes}))
+
+
+def _extract_visible_messages(history: list[dict]) -> list[dict]:
+    """El historial guardado incluye bloques internos (tool_use/tool_result)
+    que no le sirven a un humano leyendo la conversación — solo el texto
+    visible. Usado tanto por el widget de la página web como por el
+    historial que se le manda al dueño por Telegram/WhatsApp."""
     mensajes = []
     for turno in history:
         content = turno.get("content")
@@ -894,8 +999,7 @@ def widget_history():
             texto = ""
         if texto.strip():
             mensajes.append({"role": turno.get("role"), "text": texto})
-
-    return _widget_cors(jsonify({"messages": mensajes}))
+    return mensajes
 
 
 @app.post("/telegram-webhook")

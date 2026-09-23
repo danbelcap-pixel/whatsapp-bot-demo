@@ -328,6 +328,44 @@ def get_customer_active_appointments(business_name: str, wa_id: str) -> list[dic
         return []
 
 
+def search_citas_by_query(business_name: str, query: str) -> list[dict]:
+    """Busca en TODO el historial de citas de este negocio (cualquier
+    estado) coincidencias de `query` contra el nombre del cliente o su
+    número de WhatsApp (comparación insensible a mayúsculas, substring).
+
+    Devuelve UN candidato por cada customer_wa_id distinto que coincida,
+    usando su cita más reciente — nunca junta dos wa_id bajo un mismo
+    resultado, porque dos clientes distintos pueden llamarse igual y
+    confundirlos sería mostrarle al dueño la conversación de la persona
+    equivocada."""
+    sheet_id = os.getenv("GOOGLE_SHEET_ID")
+    if not sheet_id:
+        return []
+    try:
+        tab = _citas_tab_name(business_name)
+        _ensure_tab_exists(sheet_id, tab, CITAS_HEADERS)
+        rows = _values_get(sheet_id, f"'{tab}'!A2:J")
+        query_norm = query.strip().lower()
+        if not query_norm:
+            return []
+        candidatos: dict[str, dict] = {}
+        for i, row in enumerate(rows, start=2):
+            if len(row) < 4:
+                continue
+            nombre = row[3]
+            wa_id = row[2] if len(row) > 2 else ""
+            if query_norm not in nombre.lower() and query_norm not in wa_id.lower():
+                continue
+            # Se sobreescribe con cada coincidencia posterior — como las
+            # filas están en orden cronológico, la última en quedar para
+            # ese wa_id es su cita más reciente.
+            candidatos[wa_id] = _row_to_appointment(row, i)
+        return list(candidatos.values())
+    except Exception:
+        log.exception("No se pudo buscar citas por nombre/teléfono en Google Sheets")
+        return []
+
+
 def get_appointment_by_folio(business_name: str, folio: int) -> dict | None:
     """Busca una cita por folio sin importar su estado (a diferencia de
     get_pending_appointment_by_folio, que solo busca 'pendiente') — para
