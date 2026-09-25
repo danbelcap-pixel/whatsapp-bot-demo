@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from urllib.parse import quote
 
@@ -236,6 +237,50 @@ def log_event(business_name: str, evento: str) -> None:
             _values_append(sheet_id, f"'{tab}'!A1", [row])
     except Exception:
         log.exception("No se pudo registrar el evento en Google Sheets")
+
+
+def get_daily_report(business_name: str, month: str) -> list[dict] | None:
+    """Filas del reporte diario de un negocio en un mes ('YYYY-MM'), para la
+    plataforma web. None si ese nombre no está dado de alta en 'Clientes' (así
+    nadie puede usar este endpoint para leer otras pestañas de la hoja), o si
+    la hoja no está disponible. Lista vacía si el negocio existe pero todavía
+    no registra actividad. Las fechas del reporte se guardan en UTC."""
+    sheet_id = os.getenv("GOOGLE_SHEET_ID")
+    nombre = business_name.strip()
+    if not sheet_id or not nombre or not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", month):
+        return None
+    try:
+        clientes = _values_get(sheet_id, f"'{CLIENTES_TAB}'!B2:B")
+        if not any(fila and fila[0].strip() == nombre for fila in clientes):
+            return None
+        try:
+            filas = _values_get(sheet_id, "'" + nombre.replace("'", "''") + "'!A2:L")
+        except requests.HTTPError:
+            return []  # todavía no se crea la pestaña del negocio: sin actividad
+    except Exception:
+        log.exception("No se pudo leer el reporte diario de Google Sheets")
+        return None
+
+    def num(fila: list, i: int) -> int:
+        try:
+            return int(float(fila[i])) if len(fila) > i and fila[i] != "" else 0
+        except ValueError:
+            return 0
+
+    return [
+        {
+            "fecha": fila[0],
+            "mensajes": num(fila, 1),
+            "citas_solicitadas": num(fila, 2),
+            "citas_confirmadas": num(fila, 3),
+            "citas_rechazadas": num(fila, 4),
+            "citas_canceladas": num(fila, 8),
+            "citas_modificadas": num(fila, 9),
+            "interesados": num(fila, 11),
+        }
+        for fila in filas
+        if fila and str(fila[0]).startswith(month)
+    ]
 
 
 # ─── Citas ───────────────────────────────────────────────────────────────

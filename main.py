@@ -25,6 +25,7 @@ from services.memory import (
 from services.sheets import (
     add_pending_appointment,
     get_appointment_by_folio,
+    get_daily_report,
     get_pending_appointment_by_folio,
     list_pending_appointments,
     log_event,
@@ -978,6 +979,24 @@ def widget_history():
     mensajes = _extract_visible_messages(history)
 
     return _widget_cors(jsonify({"messages": mensajes}))
+
+
+@app.get("/api/reporte")
+def reporte_mensual():
+    """Datos diarios de un negocio para la plataforma web (reportes mensuales
+    del cliente). Solo lectura y solo para la plataforma: exige la clave
+    compartida REPORT_SECRET en el encabezado X-Report-Secret."""
+    secreto = os.getenv("REPORT_SECRET", "")
+    enviado = request.headers.get("X-Report-Secret", "")
+    if not secreto:
+        return jsonify({"error": "No configurado."}), 503
+    if not hmac.compare_digest(secreto.encode(), enviado.encode()):
+        return jsonify({"error": "No autorizado."}), 403
+
+    dias = get_daily_report(request.args.get("negocio", ""), request.args.get("mes", ""))
+    if dias is None:
+        return jsonify({"error": "Negocio o mes no válido."}), 404
+    return jsonify({"dias": dias})
 
 
 def _extract_visible_messages(history: list[dict]) -> list[dict]:
