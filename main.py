@@ -25,6 +25,7 @@ from services.memory import (
 from services.sheets import (
     add_pending_appointment,
     dar_de_alta_cliente,
+    desactivar_cliente,
     get_appointment_by_folio,
     get_daily_report,
     get_pending_appointment_by_folio,
@@ -1035,6 +1036,28 @@ def aprovisionar():
         log.exception("Falló el alta automática de un cliente")
         return jsonify({"error": str(exc)}), 500
     return jsonify({"ok": True, **resultado})
+
+
+@app.post("/api/desactivar")
+def desactivar():
+    """Apaga un negocio en la pestaña 'Clientes' (columna Activo = NO) cuando cancela su suscripción. Lo llama
+    la plataforma; misma clave compartida PROVISION_SECRET que /api/aprovisionar."""
+    secreto = os.getenv("PROVISION_SECRET", "")
+    enviado = request.headers.get("X-Provision-Secret", "")
+    if not secreto:
+        return jsonify({"error": "No configurado."}), 503
+    if not hmac.compare_digest(secreto.encode(), enviado.encode()):
+        return jsonify({"error": "No autorizado."}), 403
+
+    bot_name = str((request.get_json(silent=True) or {}).get("bot_name", "")).strip()
+    if not bot_name:
+        return jsonify({"error": "Falta bot_name."}), 400
+    try:
+        encontrado = desactivar_cliente(bot_name)
+    except Exception as exc:
+        log.exception("Falló la desactivación automática de un cliente")
+        return jsonify({"error": str(exc)}), 500
+    return jsonify({"ok": True, "encontrado": encontrado})
 
 
 def _extract_visible_messages(history: list[dict]) -> list[dict]:

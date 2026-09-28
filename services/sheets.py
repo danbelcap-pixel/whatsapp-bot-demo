@@ -582,6 +582,22 @@ def _slug(texto: str) -> str:
     return s or "negocio"
 
 
+def desactivar_cliente(bot_name: str) -> bool:
+    """Pone 'Activo' = NO en la fila de 'Clientes' que tenga ese nombre exacto (columna B). Se usa cuando el
+    cliente cancela su suscripción, para que el bot deje de contestarle sin que alguien tenga que entrar a
+    Sheets a mano. Funciona igual para el canal web o WhatsApp. Devuelve True si encontró y apagó la fila."""
+    sheet_id = os.getenv("GOOGLE_SHEET_ID")
+    nombre = (bot_name or "").strip()
+    if not sheet_id or not nombre:
+        return False
+    rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:N")
+    for i, row in enumerate(rows):
+        if len(row) > 1 and row[1].strip() == nombre:
+            _values_update(sheet_id, f"'{CLIENTES_TAB}'!E{i + 2}", [["NO"]])
+            return True
+    return False
+
+
 def dar_de_alta_cliente(
     business_name: str, owner_phone: str, info: str, tono: str, objetivo: str,
     agenda_citas: bool, telegram_username: str, zona_horaria: str = "", calendar_id: str = "",
