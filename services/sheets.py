@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+import secrets
 from datetime import datetime, timezone
 from urllib.parse import quote
 
@@ -51,6 +52,7 @@ CLIENTES_HEADERS = [
     "Teléfonos adicionales", "Activo", "Información del negocio",
     "Tono del bot", "Objetivo del bot", "Agenda citas", "Widget ID",
     "Telegram Chat ID", "Google Calendar ID", "Zona horaria",
+    "Telegram pendiente (usuario)",
 ]
 
 
@@ -572,4 +574,80 @@ def get_business_config_by_telegram_chat_id(chat_id: str) -> dict | None:
         return None
     except Exception:
         log.exception("No se pudo leer la pestaña Clientes de Google Sheets (por telegram_chat_id)")
+        return None
+
+
+def _slug(texto: str) -> str:
+    s = re.sub(r"[^a-z0-9]+", "-", texto.strip().lower()).strip("-")
+    return s or "negocio"
+
+
+def dar_de_alta_cliente(
+    business_name: str, owner_phone: str, info: str, tono: str, objetivo: str,
+    agenda_citas: bool, telegram_username: str, zona_horaria: str = "", calendar_id: str = "",
+) -> dict:
+    """Da de alta automáticamente un negocio del canal web/app en la pestaña 'Clientes', al momento de pagar.
+    Genera un Widget ID único y un nombre de reporte (columna 'Nombre del negocio') que no choque con uno ya
+    existente. No toca nada de WhatsApp (Phone Number ID queda vacío). Devuelve {"widget_id", "bot_name"}."""
+    sheet_id = os.getenv("GOOGLE_SHEET_ID")
+    if not sheet_id:
+        raise RuntimeError("Falta GOOGLE_SHEET_ID")
+    _ensure_tab_exists(sheet_id, CLIENTES_TAB, CLIENTES_HEADERS)
+    existentes = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:N")
+
+    nombres = {(r[1].strip() if len(r) > 1 else "") for r in existentes}
+    bot_name = business_name.strip() or "Negocio"
+    intento = bot_name
+    n = 2
+    while intento in nombres:
+        intento = f"{bot_name} ({n})"
+        n += 1
+    bot_name = intento
+
+    widget_ids = {(r[9].strip() if len(r) > 9 else "") for r in existentes}
+    base = _slug(business_name)
+    widget_id = f"{base}-{secrets.token_hex(2)}"
+    while widget_id in widget_ids:
+        widget_id = f"{base}-{secrets.token_hex(2)}"
+
+    fila = [
+        "",  # Phone Number ID (vacío: no es un número de WhatsApp)
+        bot_name,
+        owner_phone or "",
+        "",  # Teléfonos adicionales
+        "SI",  # Activo
+        info,
+        tono,
+        objetivo,
+        "SI" if agenda_citas else "NO",
+        widget_id,
+        "",  # Telegram Chat ID: se llena solo en cuanto el dueño le escriba al bot de avisos
+        calendar_id or "",
+        zona_horaria,
+        (telegram_username or "").lstrip("@").strip().lower(),
+    ]
+    _values_append(sheet_id, f"'{CLIENTES_TAB}'!A:N", [fila])
+    return {"widget_id": widget_id, "bot_name": bot_name}
+
+
+def intentar_vincular_telegram(username: str, chat_id: str) -> str | None:
+    """Cuando alguien le escribe por primera vez al bot de avisos y su chat_id no está dado de alta en ningún
+    negocio: busca una fila de 'Clientes' cuyo Telegram Chat ID esté vacío y cuyo 'Telegram pendiente (usuario)'
+    coincida con este @usuario, y la vincula sola. Devuelve el nombre del negocio si lo encontró y vinculó."""
+    sheet_id = os.getenv("GOOGLE_SHEET_ID")
+    u = (username or "").lstrip("@").strip().lower()
+    if not sheet_id or not u:
+        return None
+    try:
+        rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:N")
+        for i, row in enumerate(rows):
+            chat_actual = row[10].strip() if len(row) > 10 else ""
+            pendiente = row[13].strip().lower() if len(row) > 13 else ""
+            if not chat_actual and pendiente and pendiente == u:
+                fila_real = i + 2
+                _values_update(sheet_id, f"'{CLIENTES_TAB}'!K{fila_real}", [[str(chat_id)]])
+                return row[1] if len(row) > 1 else "tu negocio"
+        return None
+    except Exception:
+        log.exception("No se pudo intentar vincular Telegram automáticamente (usuario %s)", u)
         return None

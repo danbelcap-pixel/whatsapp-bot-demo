@@ -24,9 +24,11 @@ from services.memory import (
 )
 from services.sheets import (
     add_pending_appointment,
+    dar_de_alta_cliente,
     get_appointment_by_folio,
     get_daily_report,
     get_pending_appointment_by_folio,
+    intentar_vincular_telegram,
     list_pending_appointments,
     log_event,
     mark_appointment_resolved,
@@ -999,6 +1001,42 @@ def reporte_mensual():
     return jsonify({"dias": dias})
 
 
+@app.post("/api/aprovisionar")
+def aprovisionar():
+    """Da de alta automáticamente, en la pestaña 'Clientes', un negocio del canal web/app que acaba de pagar.
+    Lo llama la plataforma (app.beltranserviciosdigitales.com) justo después del pago. Exige la clave compartida
+    PROVISION_SECRET en el encabezado X-Provision-Secret. Nunca toca nada de WhatsApp."""
+    secreto = os.getenv("PROVISION_SECRET", "")
+    enviado = request.headers.get("X-Provision-Secret", "")
+    if not secreto:
+        return jsonify({"error": "No configurado."}), 503
+    if not hmac.compare_digest(secreto.encode(), enviado.encode()):
+        return jsonify({"error": "No autorizado."}), 403
+
+    datos = request.get_json(silent=True) or {}
+    business_name = str(datos.get("business_name", "")).strip()
+    info = str(datos.get("info", "")).strip()
+    if not business_name or not info:
+        return jsonify({"error": "Faltan business_name o info."}), 400
+
+    try:
+        resultado = dar_de_alta_cliente(
+            business_name=business_name,
+            owner_phone=str(datos.get("owner_phone", "")),
+            info=info,
+            tono=str(datos.get("tono", "")),
+            objetivo=str(datos.get("objetivo", "")),
+            agenda_citas=bool(datos.get("agenda_citas", True)),
+            telegram_username=str(datos.get("telegram_username", "")),
+            zona_horaria=str(datos.get("zona_horaria", "")),
+            calendar_id=str(datos.get("calendar_id", "")),
+        )
+    except Exception as exc:
+        log.exception("Falló el alta automática de un cliente")
+        return jsonify({"error": str(exc)}), 500
+    return jsonify({"ok": True, **resultado})
+
+
 def _extract_visible_messages(history: list[dict]) -> list[dict]:
     """El historial guardado incluye bloques internos (tool_use/tool_result)
     que no le sirven a un humano leyendo la conversación — solo el texto
@@ -1044,7 +1082,15 @@ def telegram_webhook():
 
     business = get_business_config_by_telegram(str(chat_id))
     if not business:
-        log.warning("Mensaje de Telegram de chat_id %s sin negocio dado de alta.", chat_id)
+        # Puede ser un dueño nuevo escribiéndole al bot por primera vez, para conectar su aviso — se
+        # intenta vincular solo por su @usuario de Telegram, tal como lo puso en su cuestionario.
+        username = (message.get("from") or {}).get("username", "")
+        negocio = intentar_vincular_telegram(username, str(chat_id)) if username else None
+        if negocio:
+            send_telegram_message(str(chat_id), f"¡Listo! Quedaste conectado para recibir los avisos de {negocio}. En cuanto tu agente esté activo, aquí te llegará cada solicitud de cita.")
+            log.info("Telegram vinculado automáticamente: %s -> %s", username, negocio)
+        else:
+            log.warning("Mensaje de Telegram de chat_id %s (@%s) sin negocio dado de alta.", chat_id, username)
         return "OK", 200
 
     handle_owner_reply(business, text)
