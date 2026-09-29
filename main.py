@@ -29,6 +29,7 @@ from services.sheets import (
     add_pending_appointment,
     dar_de_alta_cliente,
     desactivar_cliente,
+    eliminar_datos_finales,
     get_appointment_by_folio,
     get_daily_report,
     get_pending_appointment_by_folio,
@@ -1079,6 +1080,27 @@ def desactivar():
         log.exception("Falló la desactivación automática de un cliente")
         return jsonify({"error": str(exc)}), 500
     return jsonify({"ok": True, "encontrado": encontrado})
+
+
+@app.post("/api/eliminar-datos-finales")
+def eliminar_datos_finales_endpoint():
+    """Borra las pestañas de Citas e Interesados de un negocio (datos personales de SUS clientes
+    finales) — 90 días después de que canceló, para cumplir el aviso de privacidad de la
+    plataforma. Misma clave compartida PROVISION_SECRET que /api/aprovisionar y /api/desactivar."""
+    secreto = os.getenv("PROVISION_SECRET", "")
+    enviado = request.headers.get("X-Provision-Secret", "")
+    if not secreto:
+        return jsonify({"error": "No configurado."}), 503
+    if not hmac.compare_digest(secreto.encode(), enviado.encode()):
+        return jsonify({"error": "No autorizado."}), 403
+
+    bot_name = str((request.get_json(silent=True) or {}).get("bot_name", "")).strip()
+    if not bot_name:
+        return jsonify({"error": "Falta bot_name."}), 400
+    ok_borrado = eliminar_datos_finales(bot_name)
+    if not ok_borrado:
+        return jsonify({"error": "No se pudo completar el borrado."}), 500
+    return jsonify({"ok": True})
 
 
 def _extract_visible_messages(history: list[dict]) -> list[dict]:

@@ -664,6 +664,33 @@ def marcar_lead_contactado(business_name: str, folio: int) -> bool:
         return False
 
 
+def eliminar_datos_finales(business_name: str) -> bool:
+    """Borra las pestañas de Citas e Interesados de un negocio — datos personales de SUS
+    clientes finales (nombre, teléfono, motivo), no del negocio mismo. Se llama 90 días después
+    de que el negocio cancela su servicio, cumpliendo lo que promete el aviso de privacidad de la
+    plataforma. NO toca la pestaña de actividad diaria (esa solo tiene contadores, no datos
+    personales de nadie identificable) ni la fila del negocio en 'Clientes'.
+
+    True si borró al menos una pestaña o si ya no había ninguna que borrar (ambos casos cuentan
+    como "ya no queda nada que borrar" para quien llama). False solo si algo falló de verdad."""
+    sheet_id = os.getenv("GOOGLE_SHEET_ID")
+    if not sheet_id:
+        return False
+    try:
+        metadata = _get_metadata(sheet_id)
+        existentes = {s["properties"]["title"]: s["properties"]["sheetId"] for s in metadata.get("sheets", [])}
+        objetivo = [_citas_tab_name(business_name), _leads_tab_name(business_name)]
+        requests_body = [{"deleteSheet": {"sheetId": existentes[nombre]}} for nombre in objetivo if nombre in existentes]
+        if requests_body:
+            _batch_update(sheet_id, requests_body)
+        for nombre in objetivo:
+            _known_tabs.discard(nombre)
+        return True
+    except Exception:
+        log.exception("No se pudieron borrar las pestañas de datos finales de Google Sheets")
+        return False
+
+
 # ─── Config de negocios (multi-tenant) ──────────────────────────────────
 
 def _row_to_business_config(row: list) -> dict | None:
