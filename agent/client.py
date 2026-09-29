@@ -1,3 +1,4 @@
+import logging
 import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -7,11 +8,31 @@ from anthropic import Anthropic
 from services.memory import get_business_notice
 from services.memory import get_history as _load_history
 from services.memory import save_history as _save_history
-from services.sheets import get_customer_active_appointments
+from services.sheets import get_customer_active_appointments, log_tokens
+
+log = logging.getLogger("whatsapp-bot")
 
 MODEL = "claude-sonnet-5"
 MAX_TOKENS = 1024
 MAX_HISTORY_MESSAGES = 20
+
+
+def _registrar_tokens(negocio: str, message) -> None:
+    """Registra el consumo real de tokens de esta llamada a Claude, para que la plataforma
+    pueda calcular después el costo real de IA de cada negocio (ver lib/costos.ts). Se llama
+    después de CUALQUIER llamada a la API, no solo la que le contesta al cliente — todo ese
+    consumo es un gasto real de este negocio. Nunca debe tumbar la respuesta al cliente."""
+    try:
+        usage = message.usage
+        log_tokens(
+            negocio,
+            entrada=usage.input_tokens,
+            salida=usage.output_tokens,
+            cache_creado=getattr(usage, "cache_creation_input_tokens", 0) or 0,
+            cache_leido=getattr(usage, "cache_read_input_tokens", 0) or 0,
+        )
+    except Exception:
+        log.exception("No se pudo registrar el consumo de tokens de Claude")
 
 # Frases que suenan a "ya lo hice" (registré/cancelé/moví una cita) — si
 # aparecen en el texto SIN que se haya usado ninguna herramienta en ese
@@ -255,6 +276,7 @@ def interpret_owner_instruction(negocio: str, text: str, zona: str = "America/Me
         tools=[ANNOUNCEMENT_TOOL],
         messages=[{"role": "user", "content": text}],
     )
+    _registrar_tokens(negocio, message)
     content = [block.model_dump() for block in message.content]
     tool_block = next((b for b in content if b.get("type") == "tool_use"), None)
     return tool_block["input"]["aviso"] if tool_block else None
@@ -365,6 +387,7 @@ def interpret_owner_citas_reply(
         tools=[_pending_citas_tool(pending)],
         messages=[{"role": "user", "content": text}],
     )
+    _registrar_tokens(negocio, message)
     content = [block.model_dump() for block in message.content]
     tool_block = next((b for b in content if b.get("type") == "tool_use"), None)
     if not tool_block:
@@ -597,6 +620,7 @@ def _call_claude(
         tool_choice=({"type": "any"} if force_any_tool and tools else {"type": "auto"}),
         messages=history,
     )
+    _registrar_tokens(negocio, message)
     # .model_dump() convierte los bloques del SDK a dicts planos, para poder
     # guardarlos como JSON en Redis (los objetos del SDK no son serializables).
     content = [block.model_dump() for block in message.content]

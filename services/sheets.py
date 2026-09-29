@@ -24,6 +24,11 @@ SUMMARY_HEADERS = [
     "Citas rechazadas", "Errores", "No soportados (audio/sticker/etc)",
     "Alucinaciones bloqueadas", "Citas canceladas", "Citas modificadas",
     "Avisos de negocio actualizados", "Interesados registrados",
+    # Columnas nuevas (para que la plataforma calcule el plan que le toca a cada negocio y su
+    # costo real de IA — ver lib/reporte.ts y lib/costos.ts). Se agregan al FINAL a propósito:
+    # así ningún índice de EVENT_COLUMN existente se mueve.
+    "Conversaciones (personas distintas)", "Tokens entrada", "Tokens salida",
+    "Tokens caché creado", "Tokens caché leído",
 ]
 EVENT_COLUMN = {
     "mensaje_respondido": 1,
@@ -38,6 +43,11 @@ EVENT_COLUMN = {
     "cita_modificada": 9,
     "lead_registrado": 11,
 }
+COL_CONVERSACIONES = 12
+COL_TOKENS_ENTRADA = 13
+COL_TOKENS_SALIDA = 14
+COL_TOKENS_CACHE_CREADO = 15
+COL_TOKENS_CACHE_LEIDO = 16
 
 CITAS_HEADERS = ["Folio", "Fecha", "customer_wa_id", "nombre", "servicio", "horario", "estado", "correo", "negocio_cliente", "Google Event ID"]
 _INACTIVE_STATES = ("rechazada", "cancelada_por_cliente")
@@ -224,12 +234,16 @@ def _row_to_appointment(row: list, row_number: int) -> dict:
 
 # ─── Reporte diario ──────────────────────────────────────────────────────
 
-def log_event(business_name: str, evento: str) -> None:
-    """Suma 1 al contador del evento en la fila del día de hoy (crea la fila
-    si es la primera vez hoy). Nunca lanza excepciones — un fallo aquí no
-    debe tumbar la respuesta al cliente."""
+def _sumar_columnas(business_name: str, valores: dict[int, int]) -> None:
+    """Suma cada valor a su columna en la fila de HOY (crea la fila si es la
+    primera vez hoy), en un solo viaje de lectura y uno de escritura sin
+    importar cuántas columnas se toquen — importante porque esto se llama en
+    medio de cada respuesta del bot, y cada llamada extra a Sheets es
+    latencia real para el cliente que está esperando su mensaje. Nunca
+    lanza excepciones — un fallo aquí no debe tumbar la respuesta al cliente."""
     sheet_id = os.getenv("GOOGLE_SHEET_ID")
-    if not sheet_id or evento not in EVENT_COLUMN:
+    valores = {c: v for c, v in valores.items() if v}
+    if not sheet_id or not valores:
         return
 
     try:
@@ -237,23 +251,59 @@ def log_event(business_name: str, evento: str) -> None:
         _ensure_tab_exists(sheet_id, tab, SUMMARY_HEADERS)
 
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        col_index = EVENT_COLUMN[evento]
-        col_letter = chr(ord("A") + col_index)
+        ultima_col = chr(ord("A") + len(SUMMARY_HEADERS) - 1)
 
         rows = _values_get(sheet_id, f"'{tab}'!A2:A")
         dates = [row[0] if row else "" for row in rows]
 
         if today in dates:
             row_number = dates.index(today) + 2
-            current = _values_get(sheet_id, f"'{tab}'!{col_letter}{row_number}")
-            current_value = current[0][0] if current and current[0] else "0"
-            _values_update(sheet_id, f"'{tab}'!{col_letter}{row_number}", [[int(current_value or 0) + 1]])
+            actual = _values_get(sheet_id, f"'{tab}'!A{row_number}:{ultima_col}{row_number}")
+            fila = list(actual[0]) if actual else []
+            fila += [0] * (len(SUMMARY_HEADERS) - len(fila))
+            for col, valor in valores.items():
+                try:
+                    fila[col] = int(float(fila[col] or 0)) + valor
+                except (ValueError, TypeError):
+                    fila[col] = valor
+            _values_update(sheet_id, f"'{tab}'!A{row_number}:{ultima_col}{row_number}", [fila])
         else:
-            row = [today] + [0] * (len(SUMMARY_HEADERS) - 1)
-            row[col_index] = 1
-            _values_append(sheet_id, f"'{tab}'!A1", [row])
+            fila = [today] + [0] * (len(SUMMARY_HEADERS) - 1)
+            for col, valor in valores.items():
+                fila[col] = valor
+            _values_append(sheet_id, f"'{tab}'!A1", [fila])
     except Exception:
-        log.exception("No se pudo registrar el evento en Google Sheets")
+        log.exception("No se pudo registrar en Google Sheets")
+
+
+def log_event(business_name: str, evento: str) -> None:
+    """Suma 1 al contador del evento en la fila del día de hoy."""
+    if evento not in EVENT_COLUMN:
+        return
+    _sumar_columnas(business_name, {EVENT_COLUMN[evento]: 1})
+
+
+def log_conversacion_nueva(business_name: str) -> None:
+    """Suma 1 a "personas distintas hoy". Llamarlo solo cuando ya se
+    confirmó (con memory.es_primera_vez_hoy) que ESTE cliente/visitante
+    todavía no había escrito hoy — esta es la métrica real que define el
+    plan de cada negocio (ver lib/planes.ts en la plataforma), a
+    diferencia de "Mensajes" que cuenta cada respuesta, no cada persona."""
+    _sumar_columnas(business_name, {COL_CONVERSACIONES: 1})
+
+
+def log_tokens(business_name: str, entrada: int, salida: int, cache_creado: int = 0, cache_leido: int = 0) -> None:
+    """Acumula el consumo real de tokens de Claude de este negocio en el día
+    de hoy, para que la plataforma calcule su costo real de IA (ver
+    lib/costos.ts). Se llama después de cada llamada a la API, sin importar
+    si fue para contestarle a un cliente o para interpretar un aviso del
+    dueño — todo ese consumo es un gasto real de este negocio."""
+    _sumar_columnas(business_name, {
+        COL_TOKENS_ENTRADA: entrada,
+        COL_TOKENS_SALIDA: salida,
+        COL_TOKENS_CACHE_CREADO: cache_creado,
+        COL_TOKENS_CACHE_LEIDO: cache_leido,
+    })
 
 
 def get_daily_report(business_name: str, month: str) -> list[dict] | None:
@@ -271,7 +321,7 @@ def get_daily_report(business_name: str, month: str) -> list[dict] | None:
         if not any(fila and fila[0].strip() == nombre for fila in clientes):
             return None
         try:
-            filas = _values_get(sheet_id, "'" + nombre.replace("'", "''") + "'!A2:L")
+            filas = _values_get(sheet_id, "'" + nombre.replace("'", "''") + "'!A2:Q")
         except requests.HTTPError:
             return []  # todavía no se crea la pestaña del negocio: sin actividad
     except Exception:
@@ -294,6 +344,14 @@ def get_daily_report(business_name: str, month: str) -> list[dict] | None:
             "citas_canceladas": num(fila, 8),
             "citas_modificadas": num(fila, 9),
             "interesados": num(fila, 11),
+            # Filas viejas (de antes de estas columnas) simplemente dan 0 aquí — no hay
+            # forma de reconstruir ese consumo pasado, y no hace falta: solo importa de
+            # aquí en adelante.
+            "conversaciones": num(fila, COL_CONVERSACIONES),
+            "tokens_entrada": num(fila, COL_TOKENS_ENTRADA),
+            "tokens_salida": num(fila, COL_TOKENS_SALIDA),
+            "tokens_cache_creado": num(fila, COL_TOKENS_CACHE_CREADO),
+            "tokens_cache_leido": num(fila, COL_TOKENS_CACHE_LEIDO),
         }
         for fila in filas
         if fila and str(fila[0]).startswith(month)

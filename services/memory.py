@@ -1,6 +1,8 @@
 import json
 import logging
 import os
+from datetime import datetime, timezone
+from urllib.parse import quote
 
 import requests
 
@@ -212,4 +214,34 @@ def check_ip_rate_limit(ip: str) -> bool:
         return count <= IP_RATE_LIMIT
     except Exception:
         log.exception("No se pudo verificar el límite de mensajes por IP")
+        return True
+
+
+CONVERSACION_DIA_TTL_SECONDS = 2 * 24 * 60 * 60  # 2 días: de sobra para un día en cualquier zona horaria, se limpia solo
+
+
+def es_primera_vez_hoy(business_name: str, wa_id: str) -> bool:
+    """True si ESTE cliente/visitante todavía no le había escrito a este negocio hoy — es la
+    métrica real que decide el plan de mensualidad de cada negocio ("personas distintas al
+    día", ver lib/planes.ts en la plataforma), a diferencia de contar cada mensaje.
+
+    Usa un SET de Redis por negocio+día (SADD es atómico: si el mismo cliente manda dos
+    mensajes casi al mismo tiempo, solo el primero cuenta como "nuevo"). Sin Upstash
+    configurado, no se puede distinguir y se asume que sí es la primera vez (mejor contar de
+    más que dejar de contar)."""
+    url = _base_url()
+    if not url or not business_name or not wa_id:
+        return True
+    key = f"conv_dia:{business_name}:{datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
+    try:
+        resp = requests.post(f"{url}/sadd/{key}/{quote(wa_id, safe='')}", headers=_headers(), timeout=10)
+        resp.raise_for_status()
+        es_nuevo = resp.json().get("result") == 1
+        if es_nuevo:
+            # Solo hace falta ponerle expiración una vez (cuando ya existe no cambia nada
+            # ponerla de nuevo, pero así se evita una llamada extra en el caso común).
+            requests.post(f"{url}/expire/{key}/{CONVERSACION_DIA_TTL_SECONDS}", headers=_headers(), timeout=10)
+        return es_nuevo
+    except Exception:
+        log.exception("No se pudo verificar conversaciones distintas del día")
         return True

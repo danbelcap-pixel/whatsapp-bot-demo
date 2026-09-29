@@ -18,6 +18,7 @@ from services.business import (
 from services.memory import (
     check_ip_rate_limit,
     check_widget_rate_limit,
+    es_primera_vez_hoy,
     get_history,
     is_duplicate_message,
     save_business_notice,
@@ -32,6 +33,7 @@ from services.sheets import (
     get_pending_appointment_by_folio,
     intentar_vincular_telegram,
     list_pending_appointments,
+    log_conversacion_nueva,
     log_event,
     mark_appointment_resolved,
     search_citas_by_query,
@@ -55,6 +57,14 @@ log = logging.getLogger("whatsapp-bot")
 app = Flask(__name__)
 
 GRAPH_API_VERSION = "v21.0"
+
+
+def _registrar_conversacion(business_name: str, wa_id: str) -> None:
+    """Suma 1 a "personas distintas hoy" de este negocio, solo la primera vez que ESTE
+    cliente/visitante escribe en el día — es la métrica real que decide su plan de
+    mensualidad (ver lib/planes.ts en la plataforma)."""
+    if es_primera_vez_hoy(business_name, wa_id):
+        log_conversacion_nueva(business_name)
 
 
 def normalize_mx_number(wa_id: str) -> str:
@@ -762,6 +772,7 @@ def receive_message():
 
     send_whatsapp_message(business, wa_id, reply)
     log_event(business["name"], "mensaje_respondido")
+    _registrar_conversacion(business["name"], wa_id)
 
     if hallucination_detected:
         alert_daniel(
@@ -912,6 +923,7 @@ def widget_message():
         }))
 
     log_event(business["name"], "mensaje_respondido")
+    _registrar_conversacion(business["name"], wa_id)
 
     if hallucination_detected:
         alert_daniel(
