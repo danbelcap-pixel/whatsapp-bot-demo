@@ -158,6 +158,14 @@ def is_duplicate_message(message_id: str) -> bool:
 WIDGET_RATE_LIMIT = 100  # mensajes por visitante por hora — ver ask_agent/widget
 WIDGET_RATE_WINDOW_SECONDS = 60 * 60
 
+# visitor_id lo genera y manda el propio navegador del visitante — nada impide que alguien lo
+# cambie en cada request para saltarse por completo el límite de arriba. Este segundo límite,
+# atado a la IP real (que si cuesta cambiar), es la red de seguridad real contra un script que
+# quiera hacer gastar la cuenta de Claude a costa de Daniel. Más alto que el de por-visitante
+# porque varias personas de verdad pueden compartir la misma IP (oficina, wifi público, NAT).
+IP_RATE_LIMIT = 300  # mensajes por IP por hora
+IP_RATE_WINDOW_SECONDS = 60 * 60
+
 
 def check_widget_rate_limit(visitor_id: str) -> bool:
     """True si este visitante del chat web todavía puede mandar otro
@@ -184,4 +192,24 @@ def check_widget_rate_limit(visitor_id: str) -> bool:
         return count <= WIDGET_RATE_LIMIT
     except Exception:
         log.exception("No se pudo verificar el límite de mensajes del widget")
+        return True
+
+
+def check_ip_rate_limit(ip: str) -> bool:
+    """Igual que check_widget_rate_limit, pero por IP real en vez de por visitor_id — ver el
+    comentario de IP_RATE_LIMIT arriba."""
+    url = _base_url()
+    if not url or not ip:
+        return True
+    key = f"ip_rate:{ip}"
+    try:
+        resp = requests.post(f"{url}/incr/{key}", headers=_headers(), timeout=10)
+        resp.raise_for_status()
+        count = resp.json().get("result", 0)
+        if count == 1:
+            expire_resp = requests.post(f"{url}/expire/{key}/{IP_RATE_WINDOW_SECONDS}", headers=_headers(), timeout=10)
+            expire_resp.raise_for_status()
+        return count <= IP_RATE_LIMIT
+    except Exception:
+        log.exception("No se pudo verificar el límite de mensajes por IP")
         return True

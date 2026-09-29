@@ -16,6 +16,7 @@ from services.business import (
     get_business_config_by_widget,
 )
 from services.memory import (
+    check_ip_rate_limit,
     check_widget_rate_limit,
     get_history,
     is_duplicate_message,
@@ -648,51 +649,6 @@ def _verify_webhook_signature(payload_body: bytes, signature_header: str | None)
     return hmac.compare_digest(expected, received)
 
 
-_last_messenger_payloads = []  # DEBUG TEMPORAL — quitar junto con las rutas de abajo en cuanto termine la prueba de Marketplace/m.me
-
-
-@app.get("/messenger-webhook")
-def verify_messenger_webhook():
-    """Verificación de Meta para el webhook de Messenger — mismo mecanismo
-    que el de WhatsApp, reutiliza el mismo verify token."""
-    mode = request.args.get("hub.mode")
-    token = request.args.get("hub.verify_token")
-    challenge = request.args.get("hub.challenge")
-
-    expected_token = os.getenv("WHATSAPP_VERIFY_TOKEN")
-    if mode == "subscribe" and expected_token and token and hmac.compare_digest(token, expected_token):
-        log.info("Webhook de Messenger verificado por Meta.")
-        return challenge, 200
-
-    log.warning("Verificación de webhook de Messenger fallida (token no coincide).")
-    return "Forbidden", 403
-
-
-@app.post("/messenger-webhook")
-def receive_messenger_event():
-    """DEBUG TEMPORAL — solo para la prueba de si el ref de un link m.me
-    llega limpio. No procesa nada todavía, solo guarda el payload crudo
-    para inspeccionarlo."""
-    if not _verify_webhook_signature(request.get_data(), request.headers.get("X-Hub-Signature-256")):
-        log.warning("Firma de webhook de Messenger inválida o ausente — request rechazado.")
-        return "Forbidden", 403
-
-    payload = request.get_json(silent=True) or {}
-    _last_messenger_payloads.append(payload)
-    del _last_messenger_payloads[:-10]  # guarda solo los últimos 10
-    log.info(f"Evento de Messenger recibido: {payload}")
-    return "EVENT_RECEIVED", 200
-
-
-@app.get("/messenger-webhook/last")
-def see_last_messenger_payload():
-    """DEBUG TEMPORAL — para revisar rápido qué llegó, sin tener que buscar
-    en los logs de Render. Muestra los últimos eventos, no solo el más
-    reciente, porque Meta a veces manda el aviso de "referral" en un
-    evento separado del mensaje."""
-    return jsonify(_last_messenger_payloads or {"info": "Todavía no ha llegado ningún evento."})
-
-
 @app.get("/webhook")
 def verify_webhook():
     mode = request.args.get("hub.mode")
@@ -902,6 +858,13 @@ def _notify_new_lead(business: dict, lead: dict) -> None:
             send_whatsapp_message(business, owner, text)
 
 
+def _client_ip() -> str:
+    """IP real del visitante detrás del proxy de Render — X-Forwarded-For trae una lista
+    'cliente, proxy1, proxy2'; el primero es el visitante real."""
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    return forwarded.split(",")[0].strip() if forwarded else (request.remote_addr or "")
+
+
 def _widget_cors(response):
     """El widget se embebe en dominios de terceros (la página del cliente),
     así que el navegador exige CORS para que el fetch() no se bloquee."""
@@ -932,7 +895,9 @@ def widget_message():
 
     wa_id = f"{WEB_VISITOR_PREFIX}{visitor_id}"
 
-    if not check_widget_rate_limit(visitor_id):
+    # Dos límites independientes: por visitor_id (lo manda el navegador, cualquiera lo puede
+    # cambiar) y por IP real (más difícil de rotar) — así uno cubre lo que el otro no.
+    if not check_widget_rate_limit(visitor_id) or not check_ip_rate_limit(_client_ip()):
         return _widget_cors(jsonify({
             "reply": "Has mandado muchos mensajes en poco tiempo — intenta de nuevo en un rato, por favor.",
         }))
@@ -976,6 +941,9 @@ def widget_history():
     business = get_business_config_by_widget(widget_id)
     if not business:
         return _widget_cors(jsonify({"error": "Widget no reconocido."})), 404
+
+    if not check_ip_rate_limit(_client_ip()):
+        return _widget_cors(jsonify({"error": "Demasiadas solicitudes — intenta de nuevo en un rato."})), 429
 
     wa_id = f"{WEB_VISITOR_PREFIX}{visitor_id}"
     history = get_history(business["business_id"], wa_id)

