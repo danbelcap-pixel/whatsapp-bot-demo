@@ -221,6 +221,9 @@ def _row_to_appointment(row: list, row_number: int) -> dict:
     return {
         "row_number": row_number,
         "folio": row[0],
+        # No se usaba en ningún lado hasta ahora (ver /api/contactos, que sí necesita mostrar
+        # cuándo se pidió cada cita) — la columna siempre existió, solo faltaba leerla.
+        "fecha": row[1] if len(row) > 1 else "",
         "customer_wa_id": row[2],
         "nombre": row[3],
         "servicio": row[4],
@@ -304,6 +307,22 @@ def log_tokens(business_name: str, entrada: int, salida: int, cache_creado: int 
         COL_TOKENS_CACHE_CREADO: cache_creado,
         COL_TOKENS_CACHE_LEIDO: cache_leido,
     })
+
+
+def negocio_existe(business_name: str) -> bool:
+    """True si ese nombre está dado de alta en la pestaña 'Clientes' — se usa para validar
+    cualquier endpoint que reciba un nombre de negocio desde la plataforma, así nadie puede
+    usarlo para leer la pestaña de otro negocio con un nombre inventado."""
+    sheet_id = os.getenv("GOOGLE_SHEET_ID")
+    nombre = business_name.strip()
+    if not sheet_id or not nombre:
+        return False
+    try:
+        clientes = _values_get(sheet_id, f"'{CLIENTES_TAB}'!B2:B")
+        return any(fila and fila[0].strip() == nombre for fila in clientes)
+    except Exception:
+        log.exception("No se pudo validar el negocio contra la pestaña Clientes")
+        return False
 
 
 def get_daily_report(business_name: str, month: str) -> list[dict] | None:
@@ -546,6 +565,103 @@ def mark_appointment_resolved(business_name: str, row_number: int, estado: str) 
         _values_update(sheet_id, f"'{tab}'!G{row_number}", [[estado]])
     except Exception:
         log.exception("No se pudo marcar la cita como resuelta en Google Sheets")
+
+
+def list_all_appointments(business_name: str, limite: int = 100) -> list[dict]:
+    """Todas las citas de este negocio (cualquier estado), más recientes primero — para la
+    lista de contactos en la plataforma web (ver /api/contactos). Tope de `limite` para no
+    mandar historiales enormes de negocios con mucho tiempo activos."""
+    sheet_id = os.getenv("GOOGLE_SHEET_ID")
+    if not sheet_id:
+        return []
+    try:
+        tab = _citas_tab_name(business_name)
+        _ensure_tab_exists(sheet_id, tab, CITAS_HEADERS)
+        rows = _values_get(sheet_id, f"'{tab}'!A2:J")
+        citas = [_row_to_appointment(row, i) for i, row in enumerate(rows, start=2) if len(row) >= 7]
+        return citas[::-1][:limite]
+    except Exception:
+        log.exception("No se pudo listar las citas de Google Sheets")
+        return []
+
+
+# ─── Interesados (leads) ─────────────────────────────────────────────────
+# Antes, un interesado en contratar solo generaba un aviso de Telegram al dueño — si lo pasaba
+# por alto, el dato se perdía para siempre. Ahora también queda guardado aquí, con su propia
+# pestaña por negocio (mismo patrón que Citas), para que aparezca en su lista de contactos.
+
+LEADS_HEADERS = ["Folio", "Fecha", "nombre", "contacto", "negocio_cliente", "detalle", "estado"]
+
+
+def _leads_tab_name(business_name: str) -> str:
+    return f"{business_name} - Interesados"
+
+
+def _row_to_lead(row: list, row_number: int) -> dict:
+    return {
+        "row_number": row_number,
+        "folio": row[0],
+        "fecha": row[1] if len(row) > 1 else "",
+        "nombre": row[2] if len(row) > 2 else "",
+        "contacto": row[3] if len(row) > 3 else "",
+        "negocio_cliente": row[4] if len(row) > 4 else "",
+        "detalle": row[5] if len(row) > 5 else "",
+        "estado": row[6] if len(row) > 6 else "nuevo",
+    }
+
+
+def add_lead(business_name: str, nombre: str, contacto: str, negocio_cliente: str, detalle: str) -> int | None:
+    """Guarda un interesado en contratar como 'nuevo'. Devuelve su folio."""
+    sheet_id = os.getenv("GOOGLE_SHEET_ID")
+    if not sheet_id:
+        return None
+    try:
+        tab = _leads_tab_name(business_name)
+        _ensure_tab_exists(sheet_id, tab, LEADS_HEADERS)
+        rows = _values_get(sheet_id, f"'{tab}'!A2:A")
+        folio = len(rows) + 1
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        row = [folio, timestamp, _safe_cell(nombre), _safe_cell(contacto), _safe_cell(negocio_cliente), _safe_cell(detalle), "nuevo"]
+        _values_append(sheet_id, f"'{tab}'!A1", [row])
+        return folio
+    except Exception:
+        log.exception("No se pudo guardar el interesado en Google Sheets")
+        return None
+
+
+def list_leads(business_name: str, limite: int = 100) -> list[dict]:
+    """Todos los interesados de este negocio, más recientes primero."""
+    sheet_id = os.getenv("GOOGLE_SHEET_ID")
+    if not sheet_id:
+        return []
+    try:
+        tab = _leads_tab_name(business_name)
+        _ensure_tab_exists(sheet_id, tab, LEADS_HEADERS)
+        rows = _values_get(sheet_id, f"'{tab}'!A2:G")
+        leads = [_row_to_lead(row, i) for i, row in enumerate(rows, start=2) if row]
+        return leads[::-1][:limite]
+    except Exception:
+        log.exception("No se pudo listar los interesados de Google Sheets")
+        return []
+
+
+def marcar_lead_contactado(business_name: str, folio: int) -> bool:
+    """Marca un interesado como 'contactado'. Devuelve False si no encontró ese folio."""
+    sheet_id = os.getenv("GOOGLE_SHEET_ID")
+    if not sheet_id:
+        return False
+    try:
+        tab = _leads_tab_name(business_name)
+        _ensure_tab_exists(sheet_id, tab, LEADS_HEADERS)
+        rows = _values_get(sheet_id, f"'{tab}'!A2:A")
+        for i, row in enumerate(rows, start=2):
+            if row and str(row[0]) == str(folio):
+                _values_update(sheet_id, f"'{tab}'!G{i}", [["contactado"]])
+                return True
+        return False
+    except Exception:
+        log.exception("No se pudo marcar el interesado como contactado en Google Sheets")
+        return False
 
 
 # ─── Config de negocios (multi-tenant) ──────────────────────────────────

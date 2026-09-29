@@ -25,6 +25,7 @@ from services.memory import (
     save_history,
 )
 from services.sheets import (
+    add_lead,
     add_pending_appointment,
     dar_de_alta_cliente,
     desactivar_cliente,
@@ -32,10 +33,14 @@ from services.sheets import (
     get_daily_report,
     get_pending_appointment_by_folio,
     intentar_vincular_telegram,
+    list_all_appointments,
+    list_leads,
     list_pending_appointments,
     log_conversacion_nueva,
     log_event,
+    marcar_lead_contactado,
     mark_appointment_resolved,
+    negocio_existe,
     search_citas_by_query,
     update_appointment_calendar_event_id,
     update_appointment_horario,
@@ -841,6 +846,7 @@ def _handle_agent_action(business: dict, wa_id: str, action: dict) -> None:
 
     elif action["type"] == "lead":
         _notify_new_lead(business, action)
+        add_lead(business["name"], action["nombre"], action["contacto"], action.get("negocio_cliente", ""), action["detalle"])
         log_event(business["name"], "lead_registrado")
 
 
@@ -980,6 +986,41 @@ def reporte_mensual():
     if dias is None:
         return jsonify({"error": "Negocio o mes no válido."}), 404
     return jsonify({"dias": dias})
+
+
+def _chequear_report_secret() -> bool:
+    secreto = os.getenv("REPORT_SECRET", "")
+    enviado = request.headers.get("X-Report-Secret", "")
+    return bool(secreto) and hmac.compare_digest(secreto.encode(), enviado.encode())
+
+
+@app.get("/api/contactos")
+def contactos():
+    """Interesados y citas de un negocio, para su pestaña 'Contactos' en la plataforma web.
+    Misma clave compartida que /api/reporte (X-Report-Secret)."""
+    if not _chequear_report_secret():
+        return jsonify({"error": "No autorizado."}), 403
+    negocio = request.args.get("negocio", "")
+    if not negocio_existe(negocio):
+        return jsonify({"error": "Negocio no válido."}), 404
+    return jsonify({"leads": list_leads(negocio), "citas": list_all_appointments(negocio)})
+
+
+@app.post("/api/contactos/marcar-lead")
+def marcar_lead():
+    """El negocio marcó un interesado como ya contactado, desde la plataforma web."""
+    if not _chequear_report_secret():
+        return jsonify({"error": "No autorizado."}), 403
+    datos = request.get_json(silent=True) or {}
+    negocio = str(datos.get("negocio", ""))
+    if not negocio_existe(negocio):
+        return jsonify({"error": "Negocio no válido."}), 404
+    try:
+        folio = int(datos.get("folio"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Folio inválido."}), 400
+    encontrado = marcar_lead_contactado(negocio, folio)
+    return jsonify({"ok": True, "encontrado": encontrado})
 
 
 @app.post("/api/aprovisionar")
