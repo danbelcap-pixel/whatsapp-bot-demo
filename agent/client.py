@@ -401,6 +401,16 @@ def interpret_owner_citas_reply(
     return result
 
 
+# Cómo se nombra cada canal dentro del propio mensaje que el agente le manda al cliente —
+# "whatsapp" es el default histórico (compatibilidad con negocios ya dados de alta antes de
+# que existiera el parámetro `canal`).
+_NOMBRE_CANAL = {
+    "whatsapp": "WhatsApp",
+    "web": "el chat de su página web",
+    "messenger": "su página de Facebook (Messenger)",
+}
+
+
 def _system_prompt(
     negocio: str,
     info_negocio: str,
@@ -409,7 +419,7 @@ def _system_prompt(
     tono: str = "",
     objetivo: str = "",
     permite_citas: bool = True,
-    es_canal_web: bool = False,
+    canal: str = "whatsapp",
     zona_horaria: str = "America/Mexico_City",
 ) -> str:
     info_texto = (
@@ -449,14 +459,14 @@ def _system_prompt(
 
     if permite_citas:
         correo_texto = (
-            """
-- Este cliente te escribe desde el chat de la página web (no WhatsApp).
+            f"""
+- Este cliente te escribe desde {_NOMBRE_CANAL[canal]} (no WhatsApp).
   Cuando tomes una solicitud de cita, antes de usar la herramienta
   ofrécele mandarle la confirmación también por correo (además de que la
   vea aquí en el chat). Si acepta, pídele su correo y ponlo en el campo
   "correo" de la herramienta. Si no quiere o no contesta, sigue sin ese
   dato, sin insistir."""
-            if es_canal_web else ""
+            if canal != "whatsapp" else ""
         )
         capacidades_citas = f"""\
 - Tomar solicitudes de cita NUEVA: si el cliente quiere agendar, pídele
@@ -490,7 +500,7 @@ herramienta es que estás confirmando con el negocio y en breve avisas
         )
 
     return f"""\
-Eres el asistente de atención al cliente de {negocio}, en {"el chat de su página web" if es_canal_web else "WhatsApp"}.
+Eres el asistente de atención al cliente de {negocio}, en {_NOMBRE_CANAL[canal]}.
 
 Hoy es {_fecha_actual_str(zona_horaria)}. Si el cliente usa una referencia relativa de
 fecha u hora ("mañana", "el viernes", "en dos horas", "la próxima semana",
@@ -561,7 +571,7 @@ el cliente insista o se moleste:
   menciones al cliente.
 
 Esto es una demostración: si te preguntan qué eres, explica que eres un
-agente de IA conectado a {"esta página web" if es_canal_web else "WhatsApp"}
+agente de IA conectado a {_NOMBRE_CANAL[canal]}
 que puede automatizar respuestas y toma de citas 24/7 para negocios reales."""
 
 
@@ -596,7 +606,7 @@ def _call_claude(
     tono: str = "",
     objetivo: str = "",
     permite_citas: bool = True,
-    es_canal_web: bool = False,
+    canal: str = "whatsapp",
     zona_horaria: str = "America/Mexico_City",
     force_any_tool: bool = False,
 ) -> tuple[list[dict], str, dict | None]:
@@ -611,7 +621,7 @@ def _call_claude(
                 "text": _system_prompt(
                     negocio, info_negocio, citas_activas, aviso_negocio,
                     tono=tono, objetivo=objetivo, permite_citas=permite_citas,
-                    es_canal_web=es_canal_web, zona_horaria=zona_horaria,
+                    canal=canal, zona_horaria=zona_horaria,
                 ),
                 "cache_control": {"type": "ephemeral"},
             }
@@ -669,10 +679,15 @@ def ask_agent(
     objetivo = business.get("objetivo", "")
     permite_citas = business.get("agenda_citas", True)
     zona_horaria = business.get("zona_horaria", "America/Mexico_City")
-    # El chat de página web usa el mismo formato de wa_id que se define en
-    # main.py (WEB_VISITOR_PREFIX = "web:") — si ese prefijo cambia allá,
-    # hay que actualizarlo aquí también.
-    es_canal_web = wa_id.startswith("web:")
+    # El chat de página web y el de Messenger usan sus propios prefijos de wa_id, definidos en
+    # main.py (WEB_VISITOR_PREFIX = "web:", MESSENGER_PREFIX = "messenger:") — si esos prefijos
+    # cambian allá, hay que actualizarlos aquí también.
+    if wa_id.startswith("web:"):
+        canal = "web"
+    elif wa_id.startswith("messenger:"):
+        canal = "messenger"
+    else:
+        canal = "whatsapp"
     citas_activas = get_customer_active_appointments(negocio, wa_id) if permite_citas else []
     aviso_negocio = get_business_notice(business_id)
 
@@ -682,7 +697,7 @@ def ask_agent(
 
     content, text, tool_block = _call_claude(
         negocio, info_negocio, history, citas_activas, aviso_negocio,
-        tono=tono, objetivo=objetivo, permite_citas=permite_citas, es_canal_web=es_canal_web,
+        tono=tono, objetivo=objetivo, permite_citas=permite_citas, canal=canal,
         zona_horaria=zona_horaria,
     )
     history.append({"role": "assistant", "content": content})
@@ -698,7 +713,7 @@ def ask_agent(
         retry_content, _, retry_tool_block = _call_claude(
             negocio, info_negocio, history[:-1], citas_activas, aviso_negocio,
             tono=tono, objetivo=objetivo, permite_citas=permite_citas,
-            es_canal_web=es_canal_web, zona_horaria=zona_horaria, force_any_tool=True,
+            canal=canal, zona_horaria=zona_horaria, force_any_tool=True,
         )
         if retry_tool_block:
             content, tool_block = retry_content, retry_tool_block

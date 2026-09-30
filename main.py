@@ -12,6 +12,7 @@ from flask import Flask, jsonify, request
 from agent.client import ask_agent, interpret_owner_citas_reply, interpret_owner_instruction
 from services.business import (
     get_business_config,
+    get_business_config_by_page,
     get_business_config_by_telegram,
     get_business_config_by_widget,
 )
@@ -51,6 +52,7 @@ from services.calendar import delete_event as delete_calendar_event
 
 WEB_VISITOR_PREFIX = "web:"
 WIDGET_MAX_MESSAGE_LENGTH = 2000
+MESSENGER_PREFIX = "messenger:"
 
 load_dotenv()
 
@@ -791,6 +793,110 @@ def receive_message():
 
     if action:
         _handle_agent_action(business, wa_id, action)
+
+    return "OK", 200
+
+
+def send_messenger_message(page_id: str, recipient_psid: str, body: str) -> None:
+    """Manda un mensaje de texto por Messenger, a nombre de la página que recibió el mensaje
+    original. Usa un solo token de acceso de página por ahora (MESSENGER_PAGE_TOKEN) — sirve
+    mientras solo haya una página conectada; si más adelante cada negocio conecta la suya
+    propia, esto necesitará guardar un token por negocio, igual que el resto del sistema
+    multi-negocio ya hace por Sheets."""
+    token = os.getenv("MESSENGER_PAGE_TOKEN")
+    if not token:
+        log.error("MESSENGER_PAGE_TOKEN no configurado: no se pudo contestar por Messenger.")
+        return
+    url = f"https://graph.facebook.com/{GRAPH_API_VERSION}/me/messages"
+    try:
+        resp = requests.post(
+            url,
+            params={"access_token": token},
+            json={
+                "messaging_product": "messenger",  # ignorado por Graph, pero documenta la intención
+                "recipient": {"id": recipient_psid},
+                "message": {"text": body},
+            },
+            timeout=15,
+        )
+    except requests.RequestException as exc:
+        log.exception("Fallo de red enviando mensaje a Messenger")
+        alert_daniel(None, f"Fallo de red al enviar mensaje de Messenger a {recipient_psid} (página {page_id}): {exc}")
+        return
+    if resp.status_code >= 400:
+        log.error("Error enviando mensaje a Messenger: %s %s", resp.status_code, resp.text)
+        alert_daniel(None, f"Fallo al enviar mensaje de Messenger a {recipient_psid}: HTTP {resp.status_code} — {resp.text[:200]}")
+
+
+@app.get("/messenger-webhook")
+def verify_messenger_webhook():
+    """Mismo protocolo de verificación que Meta exige para cualquier webhook (WhatsApp,
+    Messenger, etc.) — token propio para no mezclarlo con el de WhatsApp."""
+    mode = request.args.get("hub.mode")
+    token = request.args.get("hub.verify_token")
+    challenge = request.args.get("hub.challenge")
+
+    expected_token = os.getenv("MESSENGER_VERIFY_TOKEN")
+    if mode == "subscribe" and expected_token and token and hmac.compare_digest(token, expected_token):
+        log.info("Webhook de Messenger verificado por Meta.")
+        return challenge, 200
+    log.warning("Verificación del webhook de Messenger fallida (token no coincide).")
+    return "Forbidden", 403
+
+
+@app.post("/messenger-webhook")
+def receive_messenger_message():
+    """Recibe mensajes de Messenger de cualquier página conectada. Misma firma
+    X-Hub-Signature-256 y mismo App Secret que el webhook de WhatsApp — es la misma app de Meta,
+    solo un producto distinto."""
+    if not _verify_webhook_signature(request.get_data(), request.headers.get("X-Hub-Signature-256")):
+        log.warning("Firma de webhook de Messenger inválida o ausente — request rechazado.")
+        return "Forbidden", 403
+
+    payload = request.get_json(silent=True) or {}
+    if payload.get("object") != "page":
+        return "OK", 200
+
+    for entry in payload.get("entry", []):
+        page_id = str(entry.get("id", ""))
+        for evento in entry.get("messaging", []):
+            texto = (evento.get("message") or {}).get("text")
+            psid = (evento.get("sender") or {}).get("id")
+            # Sin texto (ej. un "like" al último mensaje, o un mensaje de solo imagen/sticker) o
+            # sin remitente: no hay nada que contestar, se ignora sin tronar.
+            if not texto or not psid:
+                continue
+
+            business = get_business_config_by_page(page_id)
+            if not business:
+                log.warning("Mensaje de Messenger a la página %s sin negocio dado de alta.", page_id)
+                alert_daniel(None, f"Llegó un mensaje de Messenger a la página {page_id}, sin negocio dado de alta con ese Page ID en Clientes.")
+                continue
+
+            wa_id = f"{MESSENGER_PREFIX}{psid}"
+            try:
+                reply, action, hallucination_detected = ask_agent(business, wa_id, texto)
+            except Exception as exc:
+                log.exception("Fallo llamando a Claude para Messenger (%s)", business["name"])
+                alert_daniel(business, f"Falló la llamada a Claude respondiéndole por Messenger a {psid}: {exc}")
+                send_messenger_message(page_id, psid, "Ando teniendo un problema técnico ahora mismo — dame un momento e intenta de nuevo, por favor 🙏")
+                continue
+
+            send_messenger_message(page_id, psid, reply)
+            log_event(business["name"], "mensaje_respondido")
+            _registrar_conversacion(business["name"], wa_id)
+
+            if hallucination_detected:
+                alert_daniel(
+                    business,
+                    f"El bot (Messenger) casi confirma una acción falsa de cita a {psid} sin "
+                    f"usar la herramienta real — se bloqueó automáticamente, pero revisa el "
+                    f"prompt, esto no debería pasar."
+                )
+                log_event(business["name"], "alucinacion_detectada")
+
+            if action:
+                _handle_agent_action(business, wa_id, action)
 
     return "OK", 200
 

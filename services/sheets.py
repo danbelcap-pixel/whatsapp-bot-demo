@@ -77,7 +77,7 @@ CLIENTES_HEADERS = [
     "Teléfonos adicionales", "Activo", "Información del negocio",
     "Tono del bot", "Objetivo del bot", "Agenda citas", "Widget ID",
     "Telegram Chat ID", "Google Calendar ID", "Zona horaria",
-    "Telegram pendiente (usuario)",
+    "Telegram pendiente (usuario)", "Messenger Page ID",
 ]
 
 
@@ -707,13 +707,19 @@ def _row_to_business_config(row: list) -> dict | None:
     phone_number_id = row[0].strip() if len(row) > 0 else ""
     widget_id = row[9].strip() if len(row) > 9 else ""
     telegram_chat_id = row[10].strip() if len(row) > 10 else ""
+    messenger_page_id = row[14].strip() if len(row) > 14 else ""
     agenda_citas = row[8].strip().upper() if len(row) > 8 else "SI"
 
-    # Prioridad fija: phone_number_id > widget_id > telegram_chat_id. Si un
-    # negocio tiene varios canales configurados (ej. widget + Telegram, o
-    # WhatsApp + widget), siempre resulta en el MISMO business_id sin
-    # importar cuál de las tres funciones de búsqueda encontró la fila.
-    business_id = phone_number_id or (f"widget:{widget_id}" if widget_id else "") or f"telegram:{telegram_chat_id}"
+    # Prioridad fija: phone_number_id > widget_id > messenger_page_id > telegram_chat_id. Si un
+    # negocio tiene varios canales configurados (ej. widget + Telegram, o WhatsApp + Messenger),
+    # siempre resulta en el MISMO business_id sin importar cuál de las funciones de búsqueda
+    # encontró la fila.
+    business_id = (
+        phone_number_id
+        or (f"widget:{widget_id}" if widget_id else "")
+        or (f"messenger:{messenger_page_id}" if messenger_page_id else "")
+        or f"telegram:{telegram_chat_id}"
+    )
 
     return {
         "business_id": business_id,
@@ -729,6 +735,7 @@ def _row_to_business_config(row: list) -> dict | None:
         "agenda_citas": agenda_citas not in ("NO", "FALSE", "0"),
         "widget_id": widget_id,
         "telegram_chat_id": telegram_chat_id,
+        "messenger_page_id": messenger_page_id,
         "google_calendar_id": row[11].strip() if len(row) > 11 else "",
         # IANA (ej. "America/Tijuana", "America/Hermosillo") — el país tiene
         # varios husos horarios, no se puede asumir "hora del centro de
@@ -748,7 +755,7 @@ def get_business_config_row(phone_number_id: str) -> dict | None:
         return None
     try:
         _ensure_tab_exists(sheet_id, CLIENTES_TAB, CLIENTES_HEADERS)
-        rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:M")
+        rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:O")
         for row in rows:
             if len(row) >= 1 and row[0].strip() == phone_number_id:
                 return _row_to_business_config(row)
@@ -767,13 +774,31 @@ def get_business_config_by_widget_id(widget_id: str) -> dict | None:
         return None
     try:
         _ensure_tab_exists(sheet_id, CLIENTES_TAB, CLIENTES_HEADERS)
-        rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:M")
+        rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:O")
         for row in rows:
             if len(row) > 9 and row[9].strip() == widget_id:
                 return _row_to_business_config(row)
         return None
     except Exception:
         log.exception("No se pudo leer la pestaña Clientes de Google Sheets (por widget_id)")
+        return None
+
+
+def get_business_config_by_page_id(page_id: str) -> dict | None:
+    """Como get_business_config_row, pero busca por 'Messenger Page ID' (columna O) — para
+    negocios que contestan por su página de Facebook en vez de (o además de) WhatsApp/web."""
+    sheet_id = os.getenv("GOOGLE_SHEET_ID")
+    if not sheet_id or not page_id:
+        return None
+    try:
+        _ensure_tab_exists(sheet_id, CLIENTES_TAB, CLIENTES_HEADERS)
+        rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:O")
+        for row in rows:
+            if len(row) > 14 and row[14].strip() == page_id:
+                return _row_to_business_config(row)
+        return None
+    except Exception:
+        log.exception("No se pudo leer la pestaña Clientes de Google Sheets (por page_id)")
         return None
 
 
@@ -787,7 +812,7 @@ def get_business_config_by_telegram_chat_id(chat_id: str) -> dict | None:
         return None
     try:
         _ensure_tab_exists(sheet_id, CLIENTES_TAB, CLIENTES_HEADERS)
-        rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:M")
+        rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:O")
         for row in rows:
             if len(row) > 10 and row[10].strip() == str(chat_id):
                 return _row_to_business_config(row)

@@ -2,6 +2,7 @@ import logging
 
 from services.memory import get_cached_business_config, save_cached_business_config
 from services.sheets import (
+    get_business_config_by_page_id,
     get_business_config_by_telegram_chat_id,
     get_business_config_by_widget_id,
     get_business_config_row,
@@ -38,6 +39,23 @@ def get_business_config_by_widget(widget_id: str) -> dict | None:
         return cached
 
     config = get_business_config_by_widget_id(widget_id)
+    if config is None:
+        return None
+
+    save_cached_business_config(cache_key, config)
+    return config
+
+
+def get_business_config_by_page(page_id: str) -> dict | None:
+    """Como get_business_config, pero resuelve el negocio dueño de un mensaje de Messenger a
+    partir del ID de su página de Facebook. Se cachea bajo una llave distinta ('page:...') para
+    nunca chocar con la cache de negocios por WhatsApp/widget."""
+    cache_key = f"page:{page_id}"
+    cached = get_cached_business_config(cache_key)
+    if cached is not None:
+        return cached
+
+    config = get_business_config_by_page_id(page_id)
     if config is None:
         return None
 
