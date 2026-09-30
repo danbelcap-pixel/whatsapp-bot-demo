@@ -67,6 +67,15 @@ def _safe_cell(value) -> str:
     s = "" if value is None else str(value)
     return "'" + s if s.startswith(_FORMULA_TRIGGERS) else s
 
+
+def _texto_forzado(value) -> str:
+    """Como _safe_cell, pero SIEMPRE antepone el apóstrofo (no solo ante fórmulas) — para
+    cualquier campo que se vea como texto pero que Sheets podría malinterpretar como número y
+    corromper en silencio (ej. un precio "890,000" reinterpretado como 890, o un Page ID largo
+    convertido a notación científica). Úsalo en cualquier dato "parece número pero es texto"."""
+    s = "" if value is None else str(value)
+    return "'" + s
+
 # Pestaña de control con un renglón por negocio dado de alta — permite que
 # un mismo despliegue atienda a varios negocios a la vez, cada uno con su
 # propio número de WhatsApp, sin tocar código ni variables de entorno para
@@ -731,8 +740,8 @@ def add_propiedad(business_name: str, referencia: str, tipo: str, descripcion: s
         rows = _values_get(sheet_id, f"'{tab}'!A2:A")
         folio = len(rows) + 1
         row = [
-            folio, _safe_cell(referencia), _safe_cell(tipo), _safe_cell(descripcion),
-            _safe_cell(precio), _safe_cell(ubicacion), _safe_cell(instrucciones), "SI",
+            folio, _texto_forzado(referencia), _safe_cell(tipo), _safe_cell(descripcion),
+            _texto_forzado(precio), _safe_cell(ubicacion), _safe_cell(instrucciones), "SI",
         ]
         _values_append(sheet_id, f"'{tab}'!A1", [row])
         return folio
@@ -790,7 +799,12 @@ def editar_propiedad(business_name: str, folio: int, campos: dict) -> bool:
             col = _COL_PROPIEDAD.get(campo)
             if not col:
                 continue
-            valor_final = ("SI" if valor else "NO") if campo == "activa" else _safe_cell(str(valor))
+            if campo == "activa":
+                valor_final = "SI" if valor else "NO"
+            elif campo in ("referencia", "precio"):
+                valor_final = _texto_forzado(str(valor))
+            else:
+                valor_final = _safe_cell(str(valor))
             _values_update(sheet_id, f"'{tab}'!{col}{fila_real}", [[valor_final]], value_input_option="USER_ENTERED")
         return True
     except Exception:
