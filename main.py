@@ -882,8 +882,12 @@ def receive_messenger_message():
                 continue
 
             wa_id = f"{MESSENGER_PREFIX}{psid}"
+            # El código de referencia de un anuncio "Clic para enviar mensaje" (o de un link
+            # m.me con ?ref=) llega en dos formas posibles según el caso — se revisan ambas.
+            referral = evento.get("referral") or (evento.get("message") or {}).get("referral") or {}
+            referral_ref = referral.get("ref")
             try:
-                reply, action, hallucination_detected = ask_agent(business, wa_id, texto)
+                reply, action, hallucination_detected = ask_agent(business, wa_id, texto, referral_ref=referral_ref)
             except Exception as exc:
                 log.exception("Fallo llamando a Claude para Messenger (%s)", business["name"])
                 alert_daniel(business, f"Falló la llamada a Claude respondiéndole por Messenger a {psid}: {exc}")

@@ -8,7 +8,7 @@ from anthropic import Anthropic
 from services.memory import get_business_notice
 from services.memory import get_history as _load_history
 from services.memory import save_history as _save_history
-from services.sheets import get_customer_active_appointments, log_tokens
+from services.sheets import get_customer_active_appointments, get_propiedad_por_referencia, list_propiedades, log_tokens
 
 log = logging.getLogger("whatsapp-bot")
 
@@ -421,12 +421,35 @@ def _system_prompt(
     permite_citas: bool = True,
     canal: str = "whatsapp",
     zona_horaria: str = "America/Mexico_City",
+    propiedades: list[dict] | None = None,
+    propiedad_referida: dict | None = None,
 ) -> str:
     info_texto = (
         f"\nINFORMACIÓN DE ESTE NEGOCIO — úsala para contestar preguntas de "
         f"horarios, precios y servicios, es la fuente de verdad:\n{info_negocio}\n"
         if info_negocio else ""
     )
+
+    def _linea_propiedad(p: dict) -> str:
+        extra = f" — {p['instrucciones']}" if p.get("instrucciones") else ""
+        return f"- [{p['referencia']}] {p['tipo']}: {p['descripcion']} — ${p['precio']} MXN, {p['ubicacion']}.{extra}"
+
+    propiedades_texto = ""
+    if propiedades:
+        lineas = "\n".join(_linea_propiedad(p) for p in propiedades)
+        propiedades_texto = (
+            f"\nCATÁLOGO DE PROPIEDADES ACTIVAS de este negocio (cada una con su código de "
+            f"referencia entre corchetes):\n{lineas}\n"
+            f"Cuando alguien pregunte por una propiedad sin decir cuál, y no quede claro por el "
+            f"contexto de la conversación, PREGUNTA cuál le interesa antes de contestar detalles "
+            f"— nunca asumas ni inventes cuál es.\n"
+        )
+        if propiedad_referida:
+            propiedades_texto += (
+                f"\nESTE CLIENTE LLEGÓ DESDE UN ANUNCIO SOBRE ESTA PROPIEDAD ESPECÍFICA — asume "
+                f"que pregunta por ella a menos que mencione claramente otra cosa distinta, y no "
+                f"le preguntes cuál le interesa, ya lo sabes:\n{_linea_propiedad(propiedad_referida)}\n"
+            )
 
     tono_texto = (
         f"\nTONO Y ESTILO QUE DEBES USAR CON ESTE NEGOCIO: {tono}\n"
@@ -523,6 +546,7 @@ el chat de la página lo interpretan como texto con formato, se ven los
 símbolos literales y se ve mal. Escribe siempre en texto plano, usando
 emojis o saltos de línea si quieres organizar la idea.
 {info_texto}
+{propiedades_texto}
 {tono_texto}
 {objetivo_texto}
 {aviso_texto}
@@ -608,6 +632,8 @@ def _call_claude(
     permite_citas: bool = True,
     canal: str = "whatsapp",
     zona_horaria: str = "America/Mexico_City",
+    propiedades: list[dict] | None = None,
+    propiedad_referida: dict | None = None,
     force_any_tool: bool = False,
 ) -> tuple[list[dict], str, dict | None]:
     """Llama a Claude y devuelve (content_serializable, texto, tool_use_block)."""
@@ -622,6 +648,7 @@ def _call_claude(
                     negocio, info_negocio, citas_activas, aviso_negocio,
                     tono=tono, objetivo=objetivo, permite_citas=permite_citas,
                     canal=canal, zona_horaria=zona_horaria,
+                    propiedades=propiedades, propiedad_referida=propiedad_referida,
                 ),
                 "cache_control": {"type": "ephemeral"},
             }
@@ -649,6 +676,7 @@ def ask_agent(
     wa_id: str,
     user_message: str | list[dict],
     stored_message: str | list[dict] | None = None,
+    referral_ref: str | None = None,
 ) -> tuple[str, dict | None, bool]:
     """Devuelve (texto_para_el_cliente, accion, alucinacion_detectada).
 
@@ -671,7 +699,11 @@ def ask_agent(
     stored_message: si se da, esto es lo que se GUARDA en el historial en
     vez de user_message — para no arrastrar contenido pesado (fotos en
     base64) en cada turno futuro de la conversación, que infla memoria y
-    costo de API cada vez que se reenvía el historial completo."""
+    costo de API cada vez que se reenvía el historial completo.
+
+    referral_ref: el código de referencia de un anuncio "Clic para enviar mensaje" (viene en
+    evento['referral']['ref'] del webhook de Messenger), si el cliente llegó de uno — permite
+    identificar de qué propiedad/publicación se trata sin tener que adivinar por conversación."""
     business_id = business["business_id"]
     negocio = business["name"]
     info_negocio = business.get("info", "")
@@ -679,6 +711,8 @@ def ask_agent(
     objetivo = business.get("objetivo", "")
     permite_citas = business.get("agenda_citas", True)
     zona_horaria = business.get("zona_horaria", "America/Mexico_City")
+    propiedades = list_propiedades(negocio)
+    propiedad_referida = get_propiedad_por_referencia(negocio, referral_ref) if referral_ref else None
     # El chat de página web y el de Messenger usan sus propios prefijos de wa_id, definidos en
     # main.py (WEB_VISITOR_PREFIX = "web:", MESSENGER_PREFIX = "messenger:") — si esos prefijos
     # cambian allá, hay que actualizarlos aquí también.
@@ -698,7 +732,7 @@ def ask_agent(
     content, text, tool_block = _call_claude(
         negocio, info_negocio, history, citas_activas, aviso_negocio,
         tono=tono, objetivo=objetivo, permite_citas=permite_citas, canal=canal,
-        zona_horaria=zona_horaria,
+        zona_horaria=zona_horaria, propiedades=propiedades, propiedad_referida=propiedad_referida,
     )
     history.append({"role": "assistant", "content": content})
 
@@ -713,7 +747,8 @@ def ask_agent(
         retry_content, _, retry_tool_block = _call_claude(
             negocio, info_negocio, history[:-1], citas_activas, aviso_negocio,
             tono=tono, objetivo=objetivo, permite_citas=permite_citas,
-            canal=canal, zona_horaria=zona_horaria, force_any_tool=True,
+            canal=canal, zona_horaria=zona_horaria, propiedades=propiedades,
+            propiedad_referida=propiedad_referida, force_any_tool=True,
         )
         if retry_tool_block:
             content, tool_block = retry_content, retry_tool_block

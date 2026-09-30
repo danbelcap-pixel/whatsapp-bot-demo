@@ -691,6 +691,82 @@ def eliminar_datos_finales(business_name: str) -> bool:
         return False
 
 
+# ─── Propiedades (catálogo, para negocios tipo inmobiliaria) ────────────
+# Un negocio puede tener varias publicaciones activas a la vez (varias casas/terrenos) — esto le
+# da al bot un catálogo real para buscar, en vez de una sola descripción genérica pegada en
+# "Información del negocio". No son datos de un cliente final (no se borran a los 90 días con
+# eliminar_datos_finales): son el catálogo del NEGOCIO mismo.
+
+PROPIEDADES_HEADERS = ["Folio", "Referencia", "Tipo", "Descripcion", "Precio", "Ubicacion", "Instrucciones especiales", "Activa"]
+
+
+def _propiedades_tab_name(business_name: str) -> str:
+    return f"{business_name} - Propiedades"
+
+
+def _row_to_propiedad(row: list, row_number: int) -> dict:
+    return {
+        "row_number": row_number,
+        "folio": row[0] if len(row) > 0 else "",
+        "referencia": row[1].strip() if len(row) > 1 else "",
+        "tipo": row[2].strip() if len(row) > 2 else "",
+        "descripcion": row[3].strip() if len(row) > 3 else "",
+        "precio": row[4].strip() if len(row) > 4 else "",
+        "ubicacion": row[5].strip() if len(row) > 5 else "",
+        "instrucciones": row[6].strip() if len(row) > 6 else "",
+        "activa": (row[7].strip().upper() if len(row) > 7 else "SI") not in ("NO", "FALSE", "0"),
+    }
+
+
+def add_propiedad(business_name: str, referencia: str, tipo: str, descripcion: str, precio: str, ubicacion: str, instrucciones: str = "") -> int | None:
+    """Agrega una propiedad al catálogo del negocio. `referencia` es el identificador corto que
+    se usa en los anuncios de "Clic para enviar mensaje" (ref=...) para que el bot la reconozca
+    de inmediato sin tener que adivinar. Devuelve el folio."""
+    sheet_id = os.getenv("GOOGLE_SHEET_ID")
+    if not sheet_id:
+        return None
+    try:
+        tab = _propiedades_tab_name(business_name)
+        _ensure_tab_exists(sheet_id, tab, PROPIEDADES_HEADERS)
+        rows = _values_get(sheet_id, f"'{tab}'!A2:A")
+        folio = len(rows) + 1
+        row = [
+            folio, _safe_cell(referencia), _safe_cell(tipo), _safe_cell(descripcion),
+            _safe_cell(precio), _safe_cell(ubicacion), _safe_cell(instrucciones), "SI",
+        ]
+        _values_append(sheet_id, f"'{tab}'!A1", [row])
+        return folio
+    except Exception:
+        log.exception("No se pudo agregar la propiedad en Google Sheets")
+        return None
+
+
+def list_propiedades(business_name: str, solo_activas: bool = True) -> list[dict]:
+    """Catálogo completo de propiedades de este negocio, para que el bot busque ahí."""
+    sheet_id = os.getenv("GOOGLE_SHEET_ID")
+    if not sheet_id:
+        return []
+    try:
+        tab = _propiedades_tab_name(business_name)
+        _ensure_tab_exists(sheet_id, tab, PROPIEDADES_HEADERS)
+        rows = _values_get(sheet_id, f"'{tab}'!A2:H")
+        propiedades = [_row_to_propiedad(row, i) for i, row in enumerate(rows, start=2) if row]
+        return [p for p in propiedades if p["activa"]] if solo_activas else propiedades
+    except Exception:
+        log.exception("No se pudo listar el catálogo de propiedades de Google Sheets")
+        return []
+
+
+def get_propiedad_por_referencia(business_name: str, referencia: str) -> dict | None:
+    """Busca una propiedad por su código de referencia (el mismo que se usa en el `ref` de un
+    anuncio de 'Clic para enviar mensaje') — para saber de cuál propiedad viene el cliente sin
+    tener que adivinar por conversación."""
+    ref = (referencia or "").strip()
+    if not ref:
+        return None
+    return next((p for p in list_propiedades(business_name, solo_activas=False) if p["referencia"] == ref), None)
+
+
 # ─── Config de negocios (multi-tenant) ──────────────────────────────────
 
 def _row_to_business_config(row: list) -> dict | None:
