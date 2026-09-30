@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import hmac
+import json
 import logging
 import os
 import re
@@ -860,6 +861,13 @@ def receive_messenger_message():
     for entry in payload.get("entry", []):
         page_id = str(entry.get("id", ""))
         for evento in entry.get("messaging", []):
+            # DIAGNÓSTICO TEMPORAL (quitar cuando se resuelva lo del `ref` de Marketplace, ver
+            # commit): manda el evento completo a Telegram para ver si Meta sí incluye algo de
+            # "referral"/postback cuando el mensaje viene de una publicación de Marketplace. Va
+            # por un canal privado (el mismo bot de alertas), nunca por un endpoint expuesto.
+            if os.getenv("MESSENGER_DEBUG_PAYLOAD") == "si":
+                alert_daniel(None, f"🔍 [diagnóstico Messenger] Evento completo recibido:\n{json.dumps(evento, ensure_ascii=False, indent=2)[:3000]}")
+
             texto = (evento.get("message") or {}).get("text")
             psid = (evento.get("sender") or {}).get("id")
             # Sin texto (ej. un "like" al último mensaje, o un mensaje de solo imagen/sticker) o
