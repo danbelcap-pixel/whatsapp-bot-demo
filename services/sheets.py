@@ -767,6 +767,43 @@ def get_propiedad_por_referencia(business_name: str, referencia: str) -> dict | 
     return next((p for p in list_propiedades(business_name, solo_activas=False) if p["referencia"] == ref), None)
 
 
+_COL_PROPIEDAD = {"referencia": "B", "tipo": "C", "descripcion": "D", "precio": "E", "ubicacion": "F", "instrucciones": "G", "activa": "H"}
+
+
+def editar_propiedad(business_name: str, folio: int, campos: dict) -> bool:
+    """Actualiza uno o varios campos de una propiedad existente (por su folio), desde el panel
+    de la plataforma. `campos` es un dict con cualquier combinación de las llaves de
+    _COL_PROPIEDAD. 'activa' se manda como bool (se convierte a 'SI'/'NO'). Devuelve False si no
+    encontró ese folio."""
+    sheet_id = os.getenv("GOOGLE_SHEET_ID")
+    if not sheet_id:
+        return False
+    try:
+        tab = _propiedades_tab_name(business_name)
+        _ensure_tab_exists(sheet_id, tab, PROPIEDADES_HEADERS)
+        rows = _values_get(sheet_id, f"'{tab}'!A2:A")
+        idx = next((i for i, r in enumerate(rows) if r and str(r[0]) == str(folio)), None)
+        if idx is None:
+            return False
+        fila_real = idx + 2
+        for campo, valor in campos.items():
+            col = _COL_PROPIEDAD.get(campo)
+            if not col:
+                continue
+            valor_final = ("SI" if valor else "NO") if campo == "activa" else _safe_cell(str(valor))
+            _values_update(sheet_id, f"'{tab}'!{col}{fila_real}", [[valor_final]], value_input_option="USER_ENTERED")
+        return True
+    except Exception:
+        log.exception("No se pudo editar la propiedad en Google Sheets")
+        return False
+
+
+def eliminar_propiedad(business_name: str, folio: int) -> bool:
+    """Borrado suave: marca la propiedad como inactiva en vez de borrar la fila, para no perder
+    el historial. El bot ya no la muestra ni la usa (list_propiedades solo trae activas)."""
+    return editar_propiedad(business_name, folio, {"activa": False})
+
+
 # ─── Config de negocios (multi-tenant) ──────────────────────────────────
 
 def _row_to_business_config(row: list) -> dict | None:

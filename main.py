@@ -29,16 +29,21 @@ from services.memory import (
 from services.sheets import (
     add_lead,
     add_pending_appointment,
+    add_propiedad,
     dar_de_alta_cliente,
     desactivar_cliente,
+    editar_propiedad,
     eliminar_datos_finales,
+    eliminar_propiedad,
     get_appointment_by_folio,
     get_daily_report,
     get_pending_appointment_by_folio,
+    get_propiedad_por_referencia,
     intentar_vincular_telegram,
     list_all_appointments,
     list_leads,
     list_pending_appointments,
+    list_propiedades,
     log_conversacion_nueva,
     log_event,
     marcar_lead_contactado,
@@ -1140,6 +1145,80 @@ def marcar_lead():
         return jsonify({"error": "Folio inválido."}), 400
     encontrado = marcar_lead_contactado(negocio, folio)
     return jsonify({"ok": True, "encontrado": encontrado})
+
+
+@app.get("/api/catalogo")
+def catalogo():
+    """Catálogo completo de un negocio (propiedades, autos, productos... — cualquiera con varias
+    publicaciones activas a la vez), para su panel en la plataforma. Incluye inactivas, a
+    diferencia de lo que usa el propio bot. Misma clave que /api/reporte."""
+    if not _chequear_report_secret():
+        return jsonify({"error": "No autorizado."}), 403
+    negocio = request.args.get("negocio", "")
+    if not negocio_existe(negocio):
+        return jsonify({"error": "Negocio no válido."}), 404
+    return jsonify({"catalogo": list_propiedades(negocio, solo_activas=False)})
+
+
+@app.post("/api/catalogo/agregar")
+def catalogo_agregar():
+    if not _chequear_report_secret():
+        return jsonify({"error": "No autorizado."}), 403
+    d = request.get_json(silent=True) or {}
+    negocio = str(d.get("negocio", ""))
+    if not negocio_existe(negocio):
+        return jsonify({"error": "Negocio no válido."}), 404
+    campos = ["referencia", "tipo", "descripcion", "precio", "ubicacion"]
+    if any(not str(d.get(c, "")).strip() for c in campos):
+        return jsonify({"error": "Faltan campos obligatorios (referencia, tipo, descripcion, precio, ubicacion)."}), 400
+    if get_propiedad_por_referencia(negocio, str(d["referencia"]).strip()):
+        return jsonify({"error": "Ya existe una propiedad con esa referencia."}), 409
+    folio = add_propiedad(
+        negocio, str(d["referencia"]).strip(), str(d["tipo"]).strip(), str(d["descripcion"]).strip(),
+        str(d["precio"]).strip(), str(d["ubicacion"]).strip(), str(d.get("instrucciones", "")).strip(),
+    )
+    if folio is None:
+        return jsonify({"error": "No se pudo guardar."}), 500
+    return jsonify({"ok": True, "folio": folio})
+
+
+@app.post("/api/catalogo/editar")
+def catalogo_editar():
+    if not _chequear_report_secret():
+        return jsonify({"error": "No autorizado."}), 403
+    d = request.get_json(silent=True) or {}
+    negocio = str(d.get("negocio", ""))
+    if not negocio_existe(negocio):
+        return jsonify({"error": "Negocio no válido."}), 404
+    try:
+        folio = int(d.get("folio"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Folio inválido."}), 400
+    campos = {k: v for k, v in d.items() if k in ("referencia", "tipo", "descripcion", "precio", "ubicacion", "instrucciones", "activa")}
+    if not campos:
+        return jsonify({"error": "Nada que actualizar."}), 400
+    ok_editado = editar_propiedad(negocio, folio, campos)
+    if not ok_editado:
+        return jsonify({"error": "No encontré esa propiedad."}), 404
+    return jsonify({"ok": True})
+
+
+@app.post("/api/catalogo/eliminar")
+def catalogo_eliminar():
+    if not _chequear_report_secret():
+        return jsonify({"error": "No autorizado."}), 403
+    d = request.get_json(silent=True) or {}
+    negocio = str(d.get("negocio", ""))
+    if not negocio_existe(negocio):
+        return jsonify({"error": "Negocio no válido."}), 404
+    try:
+        folio = int(d.get("folio"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Folio inválido."}), 400
+    ok_borrado = eliminar_propiedad(negocio, folio)
+    if not ok_borrado:
+        return jsonify({"error": "No encontré esa propiedad."}), 404
+    return jsonify({"ok": True})
 
 
 @app.post("/api/aprovisionar")
