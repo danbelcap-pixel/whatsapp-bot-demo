@@ -51,6 +51,7 @@ from services.sheets import (
     search_citas_by_query,
     update_appointment_calendar_event_id,
     update_appointment_horario,
+    vincular_messenger,
 )
 from services.calendar import create_event as create_calendar_event
 from services.calendar import delete_event as delete_calendar_event
@@ -802,15 +803,15 @@ def receive_message():
     return "OK", 200
 
 
-def send_messenger_message(page_id: str, recipient_psid: str, body: str) -> None:
+def send_messenger_message(page_id: str, recipient_psid: str, body: str, page_token: str | None = None) -> None:
     """Manda un mensaje de texto por Messenger, a nombre de la página que recibió el mensaje
-    original. Usa un solo token de acceso de página por ahora (MESSENGER_PAGE_TOKEN) — sirve
-    mientras solo haya una página conectada; si más adelante cada negocio conecta la suya
-    propia, esto necesitará guardar un token por negocio, igual que el resto del sistema
-    multi-negocio ya hace por Sheets."""
-    token = os.getenv("MESSENGER_PAGE_TOKEN")
+    original. Usa el token de acceso de ESA página (columna 'Messenger Page Access Token' de
+    Clientes) — cada negocio tiene el suyo, así ya se puede dar de alta a más de una página.
+    Si una fila todavía no tiene su propio token (clientes de antes de este cambio), cae al
+    MESSENGER_PAGE_TOKEN global como respaldo."""
+    token = page_token or os.getenv("MESSENGER_PAGE_TOKEN")
     if not token:
-        log.error("MESSENGER_PAGE_TOKEN no configurado: no se pudo contestar por Messenger.")
+        log.error("Sin token de acceso para la página %s: no se pudo contestar por Messenger.", page_id)
         return
     url = f"https://graph.facebook.com/{GRAPH_API_VERSION}/me/messages"
     try:
@@ -888,10 +889,10 @@ def receive_messenger_message():
             except Exception as exc:
                 log.exception("Fallo llamando a Claude para Messenger (%s)", business["name"])
                 alert_daniel(business, f"Falló la llamada a Claude respondiéndole por Messenger a {psid}: {exc}")
-                send_messenger_message(page_id, psid, "Ando teniendo un problema técnico ahora mismo — dame un momento e intenta de nuevo, por favor 🙏")
+                send_messenger_message(page_id, psid, "Ando teniendo un problema técnico ahora mismo — dame un momento e intenta de nuevo, por favor 🙏", business.get("messenger_page_token"))
                 continue
 
-            send_messenger_message(page_id, psid, reply)
+            send_messenger_message(page_id, psid, reply, business.get("messenger_page_token"))
             log_event(business["name"], "mensaje_respondido")
             _registrar_conversacion(business["name"], wa_id)
 
@@ -1242,11 +1243,39 @@ def aprovisionar():
             telegram_username=str(datos.get("telegram_username", "")),
             zona_horaria=str(datos.get("zona_horaria", "")),
             calendar_id=str(datos.get("calendar_id", "")),
+            messenger_page_id=str(datos.get("messenger_page_id", "")),
+            messenger_page_token=str(datos.get("messenger_page_token", "")),
         )
     except Exception as exc:
         log.exception("Falló el alta automática de un cliente")
         return jsonify({"error": str(exc)}), 500
     return jsonify({"ok": True, **resultado})
+
+
+@app.post("/api/messenger/vincular")
+def messenger_vincular():
+    """Guarda el Page ID y el Page Access Token de Messenger en la fila ya existente de un
+    negocio (ver vincular_messenger en services/sheets.py). Lo llama el admin desde la
+    plataforma después de vincular la página en el dashboard de Meta — así nunca tiene que
+    abrir la hoja de Sheets a mano. Misma clave compartida que /api/aprovisionar."""
+    secreto = os.getenv("PROVISION_SECRET", "")
+    enviado = request.headers.get("X-Provision-Secret", "")
+    if not secreto:
+        return jsonify({"error": "No configurado."}), 503
+    if not hmac.compare_digest(secreto.encode(), enviado.encode()):
+        return jsonify({"error": "No autorizado."}), 403
+
+    datos = request.get_json(silent=True) or {}
+    bot_name = str(datos.get("bot_name", "")).strip()
+    page_id = str(datos.get("messenger_page_id", "")).strip()
+    page_token = str(datos.get("messenger_page_token", "")).strip()
+    if not bot_name or not page_id or not page_token:
+        return jsonify({"error": "Faltan bot_name, messenger_page_id o messenger_page_token."}), 400
+
+    ok = vincular_messenger(bot_name, page_id, page_token)
+    if not ok:
+        return jsonify({"error": f'No encontré "{bot_name}" en la hoja Clientes.'}), 404
+    return jsonify({"ok": True})
 
 
 @app.post("/api/desactivar")

@@ -87,6 +87,7 @@ CLIENTES_HEADERS = [
     "Tono del bot", "Objetivo del bot", "Agenda citas", "Widget ID",
     "Telegram Chat ID", "Google Calendar ID", "Zona horaria",
     "Telegram pendiente (usuario)", "Messenger Page ID",
+    "Messenger Page Access Token",
 ]
 
 
@@ -835,6 +836,7 @@ def _row_to_business_config(row: list) -> dict | None:
     widget_id = row[9].strip() if len(row) > 9 else ""
     telegram_chat_id = row[10].strip() if len(row) > 10 else ""
     messenger_page_id = row[14].strip() if len(row) > 14 else ""
+    messenger_page_token = row[15].strip() if len(row) > 15 else ""
     agenda_citas = row[8].strip().upper() if len(row) > 8 else "SI"
 
     # Prioridad fija: phone_number_id > widget_id > messenger_page_id > telegram_chat_id. Si un
@@ -863,6 +865,7 @@ def _row_to_business_config(row: list) -> dict | None:
         "widget_id": widget_id,
         "telegram_chat_id": telegram_chat_id,
         "messenger_page_id": messenger_page_id,
+        "messenger_page_token": messenger_page_token,
         "google_calendar_id": row[11].strip() if len(row) > 11 else "",
         # IANA (ej. "America/Tijuana", "America/Hermosillo") — el país tiene
         # varios husos horarios, no se puede asumir "hora del centro de
@@ -882,7 +885,7 @@ def get_business_config_row(phone_number_id: str) -> dict | None:
         return None
     try:
         _ensure_tab_exists(sheet_id, CLIENTES_TAB, CLIENTES_HEADERS)
-        rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:O")
+        rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:P")
         for row in rows:
             if len(row) >= 1 and row[0].strip() == phone_number_id:
                 return _row_to_business_config(row)
@@ -901,7 +904,7 @@ def get_business_config_by_widget_id(widget_id: str) -> dict | None:
         return None
     try:
         _ensure_tab_exists(sheet_id, CLIENTES_TAB, CLIENTES_HEADERS)
-        rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:O")
+        rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:P")
         for row in rows:
             if len(row) > 9 and row[9].strip() == widget_id:
                 return _row_to_business_config(row)
@@ -919,7 +922,7 @@ def get_business_config_by_page_id(page_id: str) -> dict | None:
         return None
     try:
         _ensure_tab_exists(sheet_id, CLIENTES_TAB, CLIENTES_HEADERS)
-        rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:O")
+        rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:P")
         for row in rows:
             if len(row) > 14 and row[14].strip() == page_id:
                 return _row_to_business_config(row)
@@ -939,7 +942,7 @@ def get_business_config_by_telegram_chat_id(chat_id: str) -> dict | None:
         return None
     try:
         _ensure_tab_exists(sheet_id, CLIENTES_TAB, CLIENTES_HEADERS)
-        rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:O")
+        rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:P")
         for row in rows:
             if len(row) > 10 and row[10].strip() == str(chat_id):
                 return _row_to_business_config(row)
@@ -947,6 +950,28 @@ def get_business_config_by_telegram_chat_id(chat_id: str) -> dict | None:
     except Exception:
         log.exception("No se pudo leer la pestaña Clientes de Google Sheets (por telegram_chat_id)")
         return None
+
+
+def vincular_messenger(bot_name: str, page_id: str, page_token: str) -> bool:
+    """Guarda el Page ID y el Page Access Token de Messenger en la fila ya existente de un
+    negocio (columna 'Nombre del negocio' = bot_name) — así el admin no tiene que editar la
+    hoja de Sheets a mano, solo pegar estos dos valores desde la plataforma una vez que vinculó
+    la página en el dashboard de Meta. Devuelve False si no encontró esa fila."""
+    sheet_id = os.getenv("GOOGLE_SHEET_ID")
+    if not sheet_id or not bot_name.strip():
+        return False
+    try:
+        rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:B")
+        idx = next((i for i, r in enumerate(rows) if len(r) > 1 and r[1].strip() == bot_name.strip()), None)
+        if idx is None:
+            return False
+        fila_real = idx + 2
+        _values_update(sheet_id, f"'{CLIENTES_TAB}'!O{fila_real}", [[_texto_forzado(page_id)]], value_input_option="USER_ENTERED")
+        _values_update(sheet_id, f"'{CLIENTES_TAB}'!P{fila_real}", [[_safe_cell(page_token)]], value_input_option="USER_ENTERED")
+        return True
+    except Exception:
+        log.exception("No se pudo vincular Messenger para %s", bot_name)
+        return False
 
 
 def _slug(texto: str) -> str:
@@ -973,10 +998,14 @@ def desactivar_cliente(bot_name: str) -> bool:
 def dar_de_alta_cliente(
     business_name: str, owner_phone: str, info: str, tono: str, objetivo: str,
     agenda_citas: bool, telegram_username: str, zona_horaria: str = "", calendar_id: str = "",
+    messenger_page_id: str = "", messenger_page_token: str = "",
 ) -> dict:
-    """Da de alta automáticamente un negocio del canal web/app en la pestaña 'Clientes', al momento de pagar.
-    Genera un Widget ID único y un nombre de reporte (columna 'Nombre del negocio') que no choque con uno ya
-    existente. No toca nada de WhatsApp (Phone Number ID queda vacío). Devuelve {"widget_id", "bot_name"}."""
+    """Da de alta automáticamente un negocio del canal web/app o Messenger en la pestaña 'Clientes', al
+    momento de pagar. Genera un Widget ID único y un nombre de reporte (columna 'Nombre del negocio') que
+    no choque con uno ya existente. No toca nada de WhatsApp (Phone Number ID queda vacío). Si se manda
+    messenger_page_id/messenger_page_token, se guardan de una vez (el negocio los escribió en su
+    cuestionario) — así solo falta que el admin confirme que la página quedó bien vinculada a la app de
+    Meta, no recrear la fila entera a mano. Devuelve {"widget_id", "bot_name"}."""
     sheet_id = os.getenv("GOOGLE_SHEET_ID")
     if not sheet_id:
         raise RuntimeError("Falta GOOGLE_SHEET_ID")
@@ -1013,8 +1042,10 @@ def dar_de_alta_cliente(
         calendar_id or "",
         zona_horaria,
         (telegram_username or "").lstrip("@").strip().lower(),
+        _texto_forzado(messenger_page_id) if messenger_page_id else "",
+        _safe_cell(messenger_page_token),
     ]
-    _values_append(sheet_id, f"'{CLIENTES_TAB}'!A:N", [fila])
+    _values_append(sheet_id, f"'{CLIENTES_TAB}'!A:P", [fila])
     return {"widget_id": widget_id, "bot_name": bot_name}
 
 
