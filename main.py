@@ -49,6 +49,7 @@ from services.sheets import (
     mark_appointment_resolved,
     negocio_existe,
     search_citas_by_query,
+    telegram_vinculado,
     update_appointment_calendar_event_id,
     update_appointment_horario,
     vincular_messenger,
@@ -1109,6 +1110,19 @@ def _chequear_report_secret() -> bool:
     secreto = os.getenv("REPORT_SECRET", "")
     enviado = request.headers.get("X-Report-Secret", "")
     return bool(secreto) and hmac.compare_digest(secreto.encode(), enviado.encode())
+
+
+@app.get("/api/telegram-estado")
+def telegram_estado():
+    """Si el negocio ya vinculó su Telegram de avisos — para que la plataforma le avise al admin
+    si lleva varios días sin lograrlo (typo en el @usuario, nunca le escribió al bot, etc.).
+    Misma clave compartida que /api/reporte (X-Report-Secret)."""
+    if not _chequear_report_secret():
+        return jsonify({"error": "No autorizado."}), 403
+    estado = telegram_vinculado(request.args.get("negocio", ""))
+    if estado is None:
+        return jsonify({"error": "Negocio no encontrado."}), 404
+    return jsonify(estado)
 
 
 @app.get("/api/contactos")

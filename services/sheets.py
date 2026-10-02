@@ -932,6 +932,27 @@ def get_business_config_by_page_id(page_id: str) -> dict | None:
         return None
 
 
+def telegram_vinculado(business_name: str) -> dict | None:
+    """Para que la plataforma pueda avisarle al admin si un negocio lleva días sin vincular su
+    Telegram (typo en el @usuario, nunca le escribió al bot de avisos, etc.) — sin esto, nadie se
+    entera hasta que el negocio se queje de que nunca le llegan sus citas/interesados. Devuelve
+    None si no encontró ese negocio."""
+    sheet_id = os.getenv("GOOGLE_SHEET_ID")
+    if not sheet_id or not business_name.strip():
+        return None
+    try:
+        rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:N")
+        for row in rows:
+            if len(row) > 1 and row[1].strip() == business_name.strip():
+                chat_id = row[10].strip() if len(row) > 10 else ""
+                pendiente = row[13].strip() if len(row) > 13 else ""
+                return {"vinculado": bool(chat_id), "tiene_pendiente": bool(pendiente)}
+        return None
+    except Exception:
+        log.exception("No se pudo revisar el estado de Telegram de %s", business_name)
+        return None
+
+
 def get_business_config_by_telegram_chat_id(chat_id: str) -> dict | None:
     """Como las anteriores, pero busca por 'Telegram Chat ID' (columna K) —
     para resolver a qué negocio pertenece un mensaje que llega por el
