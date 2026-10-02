@@ -213,6 +213,31 @@ LEAD_TOOL = {
 # interesado en comprar no depende de que el negocio maneje horarios.
 LEAD_TOOLS = [LEAD_TOOL]
 
+DUDA_TOOL = {
+    "name": "avisar_duda_sin_responder",
+    "description": (
+        "Úsala cada vez que le digas a un cliente que no tienes algún dato "
+        "(un precio, horario, política, servicio, etc.) porque el negocio "
+        "nunca te lo dio. Úsala JUNTO con tu respuesta honesta al cliente, "
+        "no en lugar de ella — esta herramienta solo le avisa al dueño para "
+        "que complete esa información, así no se repite la misma falla con "
+        "el siguiente cliente que pregunte lo mismo."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "pregunta": {
+                "type": "string",
+                "description": "La pregunta o el dato exacto que no supiste contestar, en pocas palabras.",
+            },
+        },
+        "required": ["pregunta"],
+    },
+}
+
+# Igual que LEAD_TOOLS: siempre disponible, sin importar si el negocio usa citas.
+DUDA_TOOLS = [DUDA_TOOL]
+
 ANNOUNCEMENT_TOOL = {
     "name": "actualizar_aviso_negocio",
     "description": (
@@ -538,7 +563,9 @@ confianza — sí la tienes.
 Responde dudas de clientes de forma breve, cálida y directa, como lo haría
 un empleado que conoce bien el negocio. Nunca inventes precios, horarios o
 datos que no tengas — si no sabes algo, dilo y ofrece tomar el dato de
-contacto para que alguien del negocio confirme.
+contacto para que alguien del negocio confirme, Y usa la herramienta
+avisar_duda_sin_responder en ese mismo turno para que el negocio se entere
+de qué le faltó contestar.
 
 Nunca uses formato de markdown (como asteriscos dobles **así** para
 negritas, guiones para listas, o símbolos de encabezado #) — ni WhatsApp ni
@@ -637,7 +664,7 @@ def _call_claude(
     force_any_tool: bool = False,
 ) -> tuple[list[dict], str, dict | None]:
     """Llama a Claude y devuelve (content_serializable, texto, tool_use_block)."""
-    tools = (ALL_TOOLS if permite_citas else []) + LEAD_TOOLS
+    tools = (ALL_TOOLS if permite_citas else []) + LEAD_TOOLS + DUDA_TOOLS
     message = get_client().messages.create(
         model=MODEL,
         max_tokens=MAX_TOKENS,
@@ -794,6 +821,12 @@ def ask_agent(
                 f"(folio #{inp['folio']}) a {inp['nuevo_horario']}. Te aviso "
                 f"en cuanto lo confirmen."
             )
+        elif name == "avisar_duda_sin_responder":
+            action = {"type": "duda", "pregunta": inp["pregunta"]}
+            # A diferencia de las demás herramientas, aquí NO se reemplaza la respuesta del
+            # cliente por un texto enlatado: su propia respuesta honesta ("no sé ese dato") ya es
+            # la correcta — esta herramienta solo dispara el aviso al dueño por separado.
+            reply = text or "No tengo ese dato a la mano, pero ya le avisé al negocio para que te confirme."
         else:  # registrar_interesado
             action = {
                 "type": "lead", "nombre": inp["nombre"],

@@ -26,6 +26,7 @@ from services.memory import (
     save_history,
 )
 from services.sheets import (
+    actualizar_info_cliente,
     add_lead,
     add_pending_appointment,
     add_propiedad,
@@ -967,6 +968,33 @@ def _handle_agent_action(business: dict, wa_id: str, action: dict) -> None:
         add_lead(business["name"], action["nombre"], action["contacto"], action.get("negocio_cliente", ""), action["detalle"])
         log_event(business["name"], "lead_registrado")
 
+    elif action["type"] == "duda":
+        _notify_duda_sin_responder(business, action["pregunta"])
+        log_event(business["name"], "duda_sin_responder")
+
+
+def _notify_duda_sin_responder(business: dict, pregunta: str) -> None:
+    """Avisa al dueño, en el momento, que su agente no supo contestarle algo a un cliente — para
+    que lo agregue a "Información de mi negocio" y no se repita con el siguiente cliente que
+    pregunte lo mismo. Mismo patrón que _notify_new_lead."""
+    if not _has_owner_contact(business):
+        alert_daniel(business, f"El agente no supo contestar algo, pero este negocio no tiene forma de avisarle al dueño configurada: {pregunta}")
+        return
+
+    text = (
+        f"❓ Tu agente no supo contestarle algo a un cliente:\n"
+        f"\"{pregunta}\"\n\n"
+        f"Si quieres que conteste esto la próxima vez, agrégalo en \"Información de mi negocio\" "
+        f"dentro de tu panel."
+    )
+    telegram_chat_id = business.get("telegram_chat_id")
+    if telegram_chat_id:
+        send_telegram_message(telegram_chat_id, text)
+    else:
+        owner = get_owner_number(business)
+        if owner:
+            send_whatsapp_message(business, owner, text)
+
 
 def _notify_new_lead(business: dict, lead: dict) -> None:
     """Avisa de inmediato al dueño de alguien interesado en contratar — sin
@@ -1287,6 +1315,38 @@ def messenger_vincular():
         return jsonify({"error": "Faltan bot_name, messenger_page_id o messenger_page_token."}), 400
 
     ok = vincular_messenger(bot_name, page_id, page_token)
+    if not ok:
+        return jsonify({"error": f'No encontré "{bot_name}" en la hoja Clientes.'}), 404
+    return jsonify({"ok": True})
+
+
+@app.post("/api/actualizar-info")
+def actualizar_info():
+    """Actualiza la información/tono/objetivo/agenda de un negocio YA activo (ver
+    actualizar_info_cliente en services/sheets.py). Lo llama la plataforma cada vez que el
+    negocio edita "Información de mi negocio" después de que su agente ya está en producción —
+    sin esto, el cambio se quedaría solo en la plataforma y el bot seguiría contestando con
+    información vieja. Misma clave compartida que /api/aprovisionar."""
+    secreto = os.getenv("PROVISION_SECRET", "")
+    enviado = request.headers.get("X-Provision-Secret", "")
+    if not secreto:
+        return jsonify({"error": "No configurado."}), 503
+    if not hmac.compare_digest(secreto.encode(), enviado.encode()):
+        return jsonify({"error": "No autorizado."}), 403
+
+    datos = request.get_json(silent=True) or {}
+    bot_name = str(datos.get("bot_name", "")).strip()
+    if not bot_name:
+        return jsonify({"error": "Falta bot_name."}), 400
+
+    ok = actualizar_info_cliente(
+        bot_name,
+        info=str(datos.get("info", "")),
+        tono=str(datos.get("tono", "")),
+        objetivo=str(datos.get("objetivo", "")),
+        agenda_citas=bool(datos.get("agenda_citas", True)),
+        calendar_id=str(datos.get("calendar_id", "")),
+    )
     if not ok:
         return jsonify({"error": f'No encontré "{bot_name}" en la hoja Clientes.'}), 404
     return jsonify({"ok": True})

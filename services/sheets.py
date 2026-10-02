@@ -29,6 +29,8 @@ SUMMARY_HEADERS = [
     # así ningún índice de EVENT_COLUMN existente se mueve.
     "Conversaciones (personas distintas)", "Tokens entrada", "Tokens salida",
     "Tokens caché creado", "Tokens caché leído",
+    # Agregada al final por la misma razón que el bloque de arriba: no mover ningún índice existente.
+    "Dudas sin responder",
 ]
 EVENT_COLUMN = {
     "mensaje_respondido": 1,
@@ -42,12 +44,14 @@ EVENT_COLUMN = {
     "aviso_negocio_actualizado": 10,
     "cita_modificada": 9,
     "lead_registrado": 11,
+    "duda_sin_responder": 17,
 }
 COL_CONVERSACIONES = 12
 COL_TOKENS_ENTRADA = 13
 COL_TOKENS_SALIDA = 14
 COL_TOKENS_CACHE_CREADO = 15
 COL_TOKENS_CACHE_LEIDO = 16
+COL_DUDAS_SIN_RESPONDER = 17
 
 CITAS_HEADERS = ["Folio", "Fecha", "customer_wa_id", "nombre", "servicio", "horario", "estado", "correo", "negocio_cliente", "Google Event ID"]
 _INACTIVE_STATES = ("rechazada", "cancelada_por_cliente")
@@ -350,7 +354,7 @@ def get_daily_report(business_name: str, month: str) -> list[dict] | None:
         if not any(fila and fila[0].strip() == nombre for fila in clientes):
             return None
         try:
-            filas = _values_get(sheet_id, "'" + nombre.replace("'", "''") + "'!A2:Q")
+            filas = _values_get(sheet_id, "'" + nombre.replace("'", "''") + "'!A2:R")
         except requests.HTTPError:
             return []  # todavía no se crea la pestaña del negocio: sin actividad
     except Exception:
@@ -373,6 +377,7 @@ def get_daily_report(business_name: str, month: str) -> list[dict] | None:
             "citas_canceladas": num(fila, 8),
             "citas_modificadas": num(fila, 9),
             "interesados": num(fila, 11),
+            "dudas_sin_responder": num(fila, COL_DUDAS_SIN_RESPONDER),
             # Filas viejas (de antes de estas columnas) simplemente dan 0 aquí — no hay
             # forma de reconstruir ese consumo pasado, y no hace falta: solo importa de
             # aquí en adelante.
@@ -992,6 +997,37 @@ def vincular_messenger(bot_name: str, page_id: str, page_token: str) -> bool:
         return True
     except Exception:
         log.exception("No se pudo vincular Messenger para %s", bot_name)
+        return False
+
+
+def actualizar_info_cliente(
+    bot_name: str, info: str, tono: str, objetivo: str, agenda_citas: bool, calendar_id: str = "",
+) -> bool:
+    """Actualiza la información/tono/objetivo/agenda de un negocio YA dado de alta (columna
+    'Nombre del negocio' = bot_name) — a diferencia de dar_de_alta_cliente, que crea una fila
+    nueva, esta SOBREESCRIBE la fila existente. Se usa cuando el negocio edita su cuestionario
+    ("Información de mi negocio") después de que su agente ya está activo: sin esto, el cambio se
+    quedaría solo en la plataforma y el bot le seguiría contestando a sus clientes con la
+    información vieja, sin que nadie se diera cuenta. Devuelve False si no encontró esa fila."""
+    sheet_id = os.getenv("GOOGLE_SHEET_ID")
+    if not sheet_id or not bot_name.strip():
+        return False
+    try:
+        rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:B")
+        idx = next((i for i, r in enumerate(rows) if len(r) > 1 and r[1].strip() == bot_name.strip()), None)
+        if idx is None:
+            return False
+        fila_real = idx + 2
+        _values_update(
+            sheet_id, f"'{CLIENTES_TAB}'!F{fila_real}:I{fila_real}",
+            [[_safe_cell(info), _safe_cell(tono), _safe_cell(objetivo), "SI" if agenda_citas else "NO"]],
+            value_input_option="USER_ENTERED",
+        )
+        if calendar_id:
+            _values_update(sheet_id, f"'{CLIENTES_TAB}'!L{fila_real}", [[calendar_id]], value_input_option="USER_ENTERED")
+        return True
+    except Exception:
+        log.exception("No se pudo actualizar la información de %s", bot_name)
         return False
 
 
