@@ -22,8 +22,10 @@ from services.memory import (
     es_primera_vez_hoy,
     get_history,
     is_duplicate_message,
+    marcar_control_humano,
     save_business_notice,
     save_history,
+    tiene_control_humano,
 )
 from services.sheets import (
     actualizar_info_cliente,
@@ -700,11 +702,24 @@ def receive_message():
 
     try:
         change_value = payload["entry"][0]["changes"][0]["value"]
-        messages = change_value.get("messages")
-        if not messages:
-            # Eventos que no son mensajes entrantes (estados de entrega, etc.)
-            return "OK", 200
+    except (KeyError, IndexError):
+        log.warning("Payload de webhook con formato inesperado: %s", payload)
+        return "OK", 200
 
+    # Coexistencia: el dueño contestó directamente desde su app normal de WhatsApp, en un número
+    # que también usa nuestra API. Llega como "message_echoes" en vez de "messages" — nunca junto
+    # con mensajes entrantes reales en el mismo evento, así que se procesa y se sale.
+    echoes = change_value.get("message_echoes")
+    if echoes:
+        _procesar_message_echoes(change_value, echoes)
+        return "OK", 200
+
+    messages = change_value.get("messages")
+    if not messages:
+        # Otros eventos que no son mensajes entrantes (estados de entrega, etc.)
+        return "OK", 200
+
+    try:
         incoming = messages[0]
         wa_id = normalize_mx_number(incoming["from"])
         msg_type = incoming.get("type", "text")
@@ -733,6 +748,14 @@ def receive_message():
     owner = get_owner_number(business)
     if owner and wa_id == owner:
         handle_owner_reply(business, incoming.get("text", {}).get("body", ""))
+        return "OK", 200
+
+    if tiene_control_humano(business["business_id"], wa_id):
+        # Coexistencia: el dueño ya está contestando a este cliente a mano desde su propia app —
+        # el bot se queda callado para no cruzarse con lo que el dueño ya está hablando. El dueño
+        # ya ve este mensaje directo en su WhatsApp (se sincroniza solo), así que no hace falta
+        # avisarle nada aparte.
+        log.info("Cliente %s en control humano (coexistencia) para %s — el bot se queda callado.", wa_id, business["name"])
         return "OK", 200
 
     stored_content = None  # si se define, es lo que se guarda en el historial en vez de user_content
@@ -803,6 +826,31 @@ def receive_message():
         _handle_agent_action(business, wa_id, action)
 
     return "OK", 200
+
+
+def _procesar_message_echoes(change_value: dict, echoes: list[dict]) -> None:
+    """Coexistencia (ver marcar_control_humano en services/memory.py): el dueño contestó
+    directamente desde su app normal de WhatsApp, en un número que también usa nuestra API.
+    Marca a cada cliente que recibió una de esas respuestas como "en control humano", para que
+    el bot se quede callado con él un rato — nunca lanza excepciones, un fallo aquí nunca debe
+    tumbar el webhook."""
+    try:
+        phone_number_id = change_value["metadata"]["phone_number_id"]
+    except KeyError:
+        return
+    business = get_business_config(phone_number_id)
+    if not business:
+        return
+    for echo in echoes:
+        to = echo.get("to")
+        if not to:
+            continue
+        try:
+            wa_id = normalize_mx_number(to)
+            marcar_control_humano(business["business_id"], wa_id)
+            log.info("Coexistencia: %s contestó a mano a %s, el bot se calla con ese cliente.", business["name"], wa_id)
+        except Exception:
+            log.exception("No se pudo procesar un message_echo de coexistencia")
 
 
 def send_messenger_message(page_id: str, recipient_psid: str, body: str, page_token: str | None = None) -> None:

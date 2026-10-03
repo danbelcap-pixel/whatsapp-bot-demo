@@ -99,6 +99,49 @@ def save_business_notice(business_id: str, aviso: str) -> None:
         log.exception("No se pudo guardar el aviso del negocio en Upstash")
 
 
+CONTROL_HUMANO_TTL_SECONDS = 4 * 60 * 60  # 4 horas: tiempo razonable para que el dueño termine de
+# atender a mano antes de que el bot retome solo, sin que tenga que acordarse de "reactivarlo".
+
+
+def _control_humano_key(business_id: str, wa_id: str) -> str:
+    return f"humano:{business_id}:{wa_id}"
+
+
+def marcar_control_humano(business_id: str, wa_id: str) -> None:
+    """Marca que el dueño le contestó a ESTE cliente directamente desde su app de WhatsApp
+    (coexistencia) — mientras dure la marca, el bot deja de contestarle automáticamente a ese
+    cliente, para no cruzarse con lo que el dueño ya está hablando a mano. Se limpia sola a las 4
+    horas si el dueño no vuelve a escribirle (ver CONTROL_HUMANO_TTL_SECONDS)."""
+    url = _base_url()
+    if not url:
+        return
+    try:
+        resp = requests.post(
+            f"{url}/setex/{_control_humano_key(business_id, wa_id)}/{CONTROL_HUMANO_TTL_SECONDS}",
+            headers=_headers(),
+            data="1",
+            timeout=10,
+        )
+        resp.raise_for_status()
+    except Exception:
+        log.exception("No se pudo marcar el control humano en Upstash")
+
+
+def tiene_control_humano(business_id: str, wa_id: str) -> bool:
+    """True si el dueño tomó el control de esta conversación hace poco (ver
+    marcar_control_humano) — el bot debe quedarse callado con este cliente mientras dure."""
+    url = _base_url()
+    if not url:
+        return False
+    try:
+        resp = requests.get(f"{url}/get/{_control_humano_key(business_id, wa_id)}", headers=_headers(), timeout=10)
+        resp.raise_for_status()
+        return resp.json().get("result") is not None
+    except Exception:
+        log.exception("No se pudo revisar el control humano en Upstash")
+        return False
+
+
 def get_cached_business_config(phone_number_id: str) -> dict | None:
     """Config de negocio cacheada (evita leer la pestaña 'Clientes' de
     Sheets en cada mensaje entrante). None si no hay nada en cache — no
