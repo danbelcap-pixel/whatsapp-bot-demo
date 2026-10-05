@@ -19,7 +19,9 @@ from services.business import (
 from services.memory import (
     check_ip_rate_limit,
     check_widget_rate_limit,
+    clear_business_notice,
     es_primera_vez_hoy,
+    get_business_notice,
     get_history,
     is_duplicate_message,
     marcar_control_humano,
@@ -38,6 +40,7 @@ from services.sheets import (
     eliminar_datos_finales,
     eliminar_propiedad,
     get_appointment_by_folio,
+    get_business_config_by_name,
     get_daily_report,
     get_pending_appointment_by_folio,
     get_propiedad_por_referencia,
@@ -1186,6 +1189,44 @@ def _chequear_report_secret() -> bool:
     secreto = os.getenv("REPORT_SECRET", "")
     enviado = request.headers.get("X-Report-Secret", "")
     return bool(secreto) and hmac.compare_digest(secreto.encode(), enviado.encode())
+
+
+@app.get("/api/aviso")
+def obtener_aviso():
+    """Aviso temporal vigente de un negocio (cierre especial, cambio de horario) — para que la
+    plataforma lo muestre y lo pueda editar desde ahí, además de que el dueño se lo diga al bot
+    directo por WhatsApp/Telegram (mismo mecanismo, ver handle_owner_reply). Misma clave que
+    /api/reporte."""
+    if not _chequear_report_secret():
+        return jsonify({"error": "No autorizado."}), 403
+    business = get_business_config_by_name(request.args.get("negocio", ""))
+    if not business:
+        return jsonify({"error": "Negocio no válido."}), 404
+    return jsonify({"aviso": get_business_notice(business["business_id"])})
+
+
+@app.post("/api/aviso")
+def guardar_aviso():
+    """Guarda (o, con texto vacío, borra) el aviso temporal de un negocio desde la plataforma —
+    mismo mecanismo que cuando el dueño se lo dice al bot por WhatsApp/Telegram: se limpia solo a
+    los 7 días si nadie lo quita antes. Misma clave que /api/aprovisionar."""
+    secreto = os.getenv("PROVISION_SECRET", "")
+    enviado = request.headers.get("X-Provision-Secret", "")
+    if not secreto:
+        return jsonify({"error": "No configurado."}), 503
+    if not hmac.compare_digest(secreto.encode(), enviado.encode()):
+        return jsonify({"error": "No autorizado."}), 403
+
+    datos = request.get_json(silent=True) or {}
+    business = get_business_config_by_name(str(datos.get("negocio", "")))
+    if not business:
+        return jsonify({"error": "Negocio no válido."}), 404
+    aviso = str(datos.get("aviso", "")).strip()[:500]
+    if aviso:
+        save_business_notice(business["business_id"], aviso)
+    else:
+        clear_business_notice(business["business_id"])
+    return jsonify({"ok": True})
 
 
 @app.get("/api/telegram-estado")

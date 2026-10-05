@@ -900,6 +900,26 @@ def get_business_config_row(phone_number_id: str) -> dict | None:
         return None
 
 
+def get_business_config_by_name(business_name: str) -> dict | None:
+    """Como get_business_config_row, pero busca por 'Nombre del negocio' (columna B) — para
+    endpoints llamados desde la plataforma que solo conocen el nombre, no un identificador de
+    canal (ej. el aviso temporal del negocio, ver /api/aviso en main.py)."""
+    sheet_id = os.getenv("GOOGLE_SHEET_ID")
+    nombre = business_name.strip()
+    if not sheet_id or not nombre:
+        return None
+    try:
+        _ensure_tab_exists(sheet_id, CLIENTES_TAB, CLIENTES_HEADERS)
+        rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:P")
+        for row in rows:
+            if len(row) > 1 and row[1].strip() == nombre:
+                return _row_to_business_config(row)
+        return None
+    except Exception:
+        log.exception("No se pudo leer la pestaña Clientes de Google Sheets (por nombre)")
+        return None
+
+
 def get_business_config_by_widget_id(widget_id: str) -> dict | None:
     """Como get_business_config_row, pero busca por 'Widget ID' (columna J)
     en vez de por Phone Number ID — para negocios que usan el chat de su

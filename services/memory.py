@@ -99,6 +99,19 @@ def save_business_notice(business_id: str, aviso: str) -> None:
         log.exception("No se pudo guardar el aviso del negocio en Upstash")
 
 
+def clear_business_notice(business_id: str) -> None:
+    """Quita el aviso antes de que expire solo — para cuando el dueño lo borra desde la
+    plataforma en vez de dejar pasar los 7 días."""
+    url = _base_url()
+    if not url:
+        return
+    try:
+        resp = requests.post(f"{url}/del/{_notice_key(business_id)}", headers=_headers(), timeout=10)
+        resp.raise_for_status()
+    except Exception:
+        log.exception("No se pudo borrar el aviso del negocio en Upstash")
+
+
 CONTROL_HUMANO_TTL_SECONDS = 4 * 60 * 60  # 4 horas: tiempo razonable para que el dueño termine de
 # atender a mano antes de que el bot retome solo, sin que tenga que acordarse de "reactivarlo".
 
