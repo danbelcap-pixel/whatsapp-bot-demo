@@ -59,6 +59,7 @@ from services.sheets import (
     update_appointment_calendar_event_id,
     update_appointment_horario,
     vincular_messenger,
+    vincular_numero_whatsapp,
 )
 from services.calendar import create_event as create_calendar_event
 from services.calendar import delete_event as delete_calendar_event
@@ -1404,6 +1405,31 @@ def messenger_vincular():
         return jsonify({"error": "Faltan bot_name, messenger_page_id o messenger_page_token."}), 400
 
     ok = vincular_messenger(bot_name, page_id, page_token)
+    if not ok:
+        return jsonify({"error": f'No encontré "{bot_name}" en la hoja Clientes.'}), 404
+    return jsonify({"ok": True})
+
+
+@app.post("/api/whatsapp/vincular-numero")
+def whatsapp_vincular_numero():
+    """Completa el Phone Number ID en la fila ya existente de un negocio (ver
+    vincular_numero_whatsapp en services/sheets.py). Lo llama la plataforma justo cuando el
+    negocio termina de conectar su número (Embedded Signup) — así nunca hay que tocar la hoja de
+    Sheets a mano para este paso. Misma clave compartida que /api/aprovisionar."""
+    secreto = os.getenv("PROVISION_SECRET", "")
+    enviado = request.headers.get("X-Provision-Secret", "")
+    if not secreto:
+        return jsonify({"error": "No configurado."}), 503
+    if not hmac.compare_digest(secreto.encode(), enviado.encode()):
+        return jsonify({"error": "No autorizado."}), 403
+
+    datos = request.get_json(silent=True) or {}
+    bot_name = str(datos.get("bot_name", "")).strip()
+    phone_number_id = str(datos.get("phone_number_id", "")).strip()
+    if not bot_name or not phone_number_id:
+        return jsonify({"error": "Faltan bot_name o phone_number_id."}), 400
+
+    ok = vincular_numero_whatsapp(bot_name, phone_number_id)
     if not ok:
         return jsonify({"error": f'No encontré "{bot_name}" en la hoja Clientes.'}), 404
     return jsonify({"ok": True})

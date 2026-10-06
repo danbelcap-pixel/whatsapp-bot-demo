@@ -1126,6 +1126,28 @@ def dar_de_alta_cliente(
     return {"widget_id": widget_id, "bot_name": bot_name}
 
 
+def vincular_numero_whatsapp(bot_name: str, phone_number_id: str) -> bool:
+    """Completa el Phone Number ID (columna A) en la fila que ya existía de un negocio (columna
+    'Nombre del negocio' = bot_name) — se da de alta la fila sin este dato al pagar, porque el
+    negocio todavía no había conectado su número; esto lo completa solo en cuanto termina el
+    Embedded Signup, sin que el admin tenga que tocar la hoja. Devuelve False si no encontró esa
+    fila (p.ej. su alta automática al pagar nunca se completó)."""
+    sheet_id = os.getenv("GOOGLE_SHEET_ID")
+    if not sheet_id or not bot_name.strip() or not phone_number_id.strip():
+        return False
+    try:
+        rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:B")
+        idx = next((i for i, r in enumerate(rows) if len(r) > 1 and r[1].strip() == bot_name.strip()), None)
+        if idx is None:
+            return False
+        fila_real = idx + 2
+        _values_update(sheet_id, f"'{CLIENTES_TAB}'!A{fila_real}", [[_texto_forzado(phone_number_id)]], value_input_option="USER_ENTERED")
+        return True
+    except Exception:
+        log.exception("No se pudo vincular el número de WhatsApp para %s", bot_name)
+        return False
+
+
 def intentar_vincular_telegram(username: str, chat_id: str) -> str | None:
     """Cuando alguien le escribe por primera vez al bot de avisos y su chat_id no está dado de alta en ningún
     negocio: busca una fila de 'Clientes' cuyo Telegram Chat ID esté vacío y cuyo 'Telegram pendiente (usuario)'
