@@ -927,6 +927,15 @@ def receive_messenger_message():
             if not texto or not psid:
                 continue
 
+            # Meta reintenta el webhook si no contestamos lo bastante rápido (o por cualquier
+            # fallo de red de su lado) — sin esto, el mismo mensaje se procesaba dos veces y el
+            # bot mandaba dos respuestas distintas (dos llamadas independientes a Claude) para lo
+            # mismo. Mismo mecanismo que ya existe para WhatsApp (ver más arriba, is_duplicate_message).
+            message_id = (evento.get("message") or {}).get("mid")
+            if message_id and is_duplicate_message(message_id):
+                log.info("Mensaje de Messenger %s duplicado (reintento de Meta), ignorado.", message_id)
+                continue
+
             business = get_business_config_by_page(page_id)
             if not business:
                 log.warning("Mensaje de Messenger a la página %s sin negocio dado de alta.", page_id)
