@@ -10,6 +10,8 @@ import requests
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.oauth2 import service_account
 
+from services.memory import delete_cached_business_config
+
 log = logging.getLogger("whatsapp-bot")
 
 SHEETS_API = "https://sheets.googleapis.com/v4/spreadsheets"
@@ -1033,7 +1035,7 @@ def actualizar_info_cliente(
     if not sheet_id or not bot_name.strip():
         return False
     try:
-        rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:B")
+        rows = _values_get(sheet_id, f"'{CLIENTES_TAB}'!A2:P")
         idx = next((i for i, r in enumerate(rows) if len(r) > 1 and r[1].strip() == bot_name.strip()), None)
         if idx is None:
             return False
@@ -1045,10 +1047,31 @@ def actualizar_info_cliente(
         )
         if calendar_id:
             _values_update(sheet_id, f"'{CLIENTES_TAB}'!L{fila_real}", [[calendar_id]], value_input_option="USER_ENTERED")
+        _limpiar_cache_de_fila(rows[idx])
         return True
     except Exception:
         log.exception("No se pudo actualizar la información de %s", bot_name)
         return False
+
+
+def _limpiar_cache_de_fila(row: list) -> None:
+    """Borra la config de negocio cacheada bajo CADA identificador que tenga esta fila (puede
+    tener varios canales a la vez: WhatsApp + widget, por ejemplo) — así una edición se refleja
+    de inmediato sin esperar a que expire sola la caché de 5 minutos (ver BUSINESS_CONFIG_TTL_SECONDS
+    en services/memory.py)."""
+    phone_number_id = row[0].strip() if len(row) > 0 else ""
+    widget_id = row[9].strip() if len(row) > 9 else ""
+    telegram_chat_id = row[10].strip() if len(row) > 10 else ""
+    messenger_page_id = row[14].strip() if len(row) > 14 else ""
+
+    if phone_number_id:
+        delete_cached_business_config(phone_number_id)
+    if widget_id:
+        delete_cached_business_config(f"widget:{widget_id}")
+    if telegram_chat_id:
+        delete_cached_business_config(f"telegram:{telegram_chat_id}")
+    if messenger_page_id:
+        delete_cached_business_config(f"page:{messenger_page_id}")
 
 
 def _slug(texto: str) -> str:

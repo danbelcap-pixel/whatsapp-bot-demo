@@ -189,6 +189,20 @@ def save_cached_business_config(phone_number_id: str, config: dict) -> None:
         log.exception("No se pudo guardar la config de negocio en cache en Upstash")
 
 
+def delete_cached_business_config(cache_key: str) -> None:
+    """Borra la config de negocio cacheada bajo esta llave (phone_number_id, 'widget:...',
+    'page:...' o 'telegram:...') — se llama justo después de editar un negocio ya activo, para
+    que el cambio se refleje de inmediato en vez de esperar hasta 5 minutos a que expire sola."""
+    url = _base_url()
+    if not url or not cache_key:
+        return
+    try:
+        resp = requests.post(f"{url}/del/negocio:{cache_key}", headers=_headers(), timeout=10)
+        resp.raise_for_status()
+    except Exception:
+        log.exception("No se pudo borrar la config de negocio en cache en Upstash")
+
+
 def is_duplicate_message(message_id: str) -> bool:
     """Marca este message_id de WhatsApp como procesado y devuelve True si
     YA se había procesado antes (webhook reenviado por Meta). Usa SET...NX
