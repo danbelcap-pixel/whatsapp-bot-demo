@@ -44,6 +44,12 @@ _FAKE_CONFIRMATION_MARKERS = [
     "ya cancel", "cancelación registrada", "cancelacion registrada",
     "ya se movió", "ya quedó cambiad", "ya quedó modificad",
     "horario actualizado", "ya la movi", "ya lo movi",
+    # Encontrado en prueba real (15 de octubre): el modelo dijo "entonces
+    # agendo tu plática..." en presente/futuro inmediato, sin usar la
+    # herramienta — ninguno de los marcadores de arriba lo detectaba porque
+    # todos asumían tiempo pasado ("ya registré"/"quedó registrada").
+    "agendo tu", "te agendo", "lo agendo", "la agendo",
+    "queda agendad", "ya quedó agendad", "cita agendada",
 ]
 
 _DIAS_SEMANA = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
