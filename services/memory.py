@@ -8,7 +8,11 @@ import requests
 
 log = logging.getLogger("whatsapp-bot")
 
-TTL_SECONDS = 3 * 24 * 60 * 60  # 3 dias: suficiente para retomar una conversacion sin acumular basura
+TTL_SECONDS = 30 * 24 * 60 * 60  # 30 dias: una persona real puede tardar varios dias en contestar
+# (ej. "ok, gracias" dos dias despues) y el bot necesita recordar la conversacion para no
+# repetir su mensaje de apertura como si fuera la primera vez que le escribe. El historial ya
+# esta acotado en tamano por MAX_HISTORY_MESSAGES/_trim (ver agent/client.py), asi que alargar
+# el TTL no hace crecer el costo por conversacion, solo cuanto tiempo se recuerda.
 
 
 def _base_url() -> str:

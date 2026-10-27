@@ -202,6 +202,21 @@ def fetch_whatsapp_media(media_id: str) -> tuple[bytes, str] | None:
         return None
 
 
+def fetch_messenger_media(url: str) -> tuple[bytes, str] | None:
+    """Descarga un archivo multimedia de Messenger. A diferencia de WhatsApp, el payload del
+    webhook ya trae una URL directa y temporal (sin necesitar un token ni una consulta previa a
+    Graph API) — basta con pedirla. Devuelve (bytes_del_archivo, mime_type), adivinando el
+    mime_type del header Content-Type ya que Messenger no lo manda aparte como sí hace WhatsApp."""
+    try:
+        resp = requests.get(url, timeout=20)
+        resp.raise_for_status()
+        mime_type = resp.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
+        return resp.content, mime_type
+    except requests.RequestException:
+        log.exception("No se pudo descargar el archivo multimedia de Messenger (%s)", url)
+        return None
+
+
 def send_whatsapp_message(business: dict, to: str, body: str) -> None:
     """Manda el mensaje DESDE el número de WhatsApp de este negocio
     específico — cada negocio dado de alta en la pestaña Clientes tiene su
@@ -920,18 +935,21 @@ def receive_messenger_message():
     for entry in payload.get("entry", []):
         page_id = str(entry.get("id", ""))
         for evento in entry.get("messaging", []):
-            texto = (evento.get("message") or {}).get("text")
+            mensaje = evento.get("message") or {}
+            texto = mensaje.get("text")
             psid = (evento.get("sender") or {}).get("id")
-            # Sin texto (ej. un "like" al último mensaje, o un mensaje de solo imagen/sticker) o
-            # sin remitente: no hay nada que contestar, se ignora sin tronar.
-            if not texto or not psid:
+            attachments = mensaje.get("attachments") or []
+            imagen = next((a for a in attachments if a.get("type") == "image"), None)
+            # Sin texto NI imagen (ej. un "like" al último mensaje, o un sticker) o sin
+            # remitente: no hay nada que contestar, se ignora sin tronar.
+            if (not texto and not imagen) or not psid:
                 continue
 
             # Meta reintenta el webhook si no contestamos lo bastante rápido (o por cualquier
             # fallo de red de su lado) — sin esto, el mismo mensaje se procesaba dos veces y el
             # bot mandaba dos respuestas distintas (dos llamadas independientes a Claude) para lo
             # mismo. Mismo mecanismo que ya existe para WhatsApp (ver más arriba, is_duplicate_message).
-            message_id = (evento.get("message") or {}).get("mid")
+            message_id = mensaje.get("mid")
             if message_id and is_duplicate_message(message_id):
                 log.info("Mensaje de Messenger %s duplicado (reintento de Meta), ignorado.", message_id)
                 continue
@@ -945,10 +963,31 @@ def receive_messenger_message():
             wa_id = f"{MESSENGER_PREFIX}{psid}"
             # El código de referencia de un anuncio "Clic para enviar mensaje" (o de un link
             # m.me con ?ref=) llega en dos formas posibles según el caso — se revisan ambas.
-            referral = evento.get("referral") or (evento.get("message") or {}).get("referral") or {}
+            referral = evento.get("referral") or mensaje.get("referral") or {}
             referral_ref = referral.get("ref")
+
+            stored_content = None  # si se define, es lo que se guarda en el historial en vez de user_content
+            if imagen:
+                media = fetch_messenger_media(imagen.get("payload", {}).get("url", ""))
+                if not media:
+                    send_messenger_message(page_id, psid, "No pude abrir tu foto, ¿me la puedes describir por texto?", business.get("messenger_page_token"))
+                    continue
+                image_bytes, mime_type = media
+                user_content = [
+                    {
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": mime_type, "data": base64.b64encode(image_bytes).decode()},
+                    },
+                    {"type": "text", "text": texto or "(el cliente mandó esta foto sin descripción)"},
+                ]
+                # Igual que en WhatsApp: no se guarda la foto completa en el historial, para no
+                # reenviarla entera (e inflar memoria y costo) en cada turno futuro del chat.
+                stored_content = f"[Foto adjunta{f': {texto}' if texto else ' (sin descripción)'}]"
+            else:
+                user_content = texto
+
             try:
-                reply, action, hallucination_detected = ask_agent(business, wa_id, texto, referral_ref=referral_ref)
+                reply, action, hallucination_detected = ask_agent(business, wa_id, user_content, stored_message=stored_content, referral_ref=referral_ref)
             except Exception as exc:
                 log.exception("Fallo llamando a Claude para Messenger (%s)", business["name"])
                 alert_daniel(business, f"Falló la llamada a Claude respondiéndole por Messenger a {psid}: {exc}")
