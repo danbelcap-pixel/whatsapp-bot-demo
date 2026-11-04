@@ -31,12 +31,15 @@ from services.memory import (
 )
 from services.sheets import (
     actualizar_info_cliente,
+    add_archivo,
     add_lead,
     add_pending_appointment,
     add_propiedad,
     dar_de_alta_cliente,
     desactivar_cliente,
+    editar_archivo,
     editar_propiedad,
+    eliminar_archivo,
     eliminar_datos_finales,
     eliminar_propiedad,
     get_appointment_by_folio,
@@ -46,6 +49,7 @@ from services.sheets import (
     get_propiedad_por_referencia,
     intentar_vincular_telegram,
     list_all_appointments,
+    list_archivos,
     list_leads,
     list_pending_appointments,
     list_propiedades,
@@ -292,6 +296,39 @@ def send_whatsapp_template(business: dict, to: str, template_name: str, params: 
         log.error("Error enviando plantilla '%s': %s %s", template_name, resp.status_code, resp.text)
         alert_daniel(business, f"Fallo al enviar plantilla '{template_name}' a {to}: HTTP {resp.status_code} — {resp.text[:200]}")
         log_event(business["name"], "error_envio")
+
+
+def send_whatsapp_document(business: dict, to: str, url: str, filename: str, caption: str = "") -> None:
+    """Manda un documento (PDF, etc.) por WhatsApp a partir de un link público — WhatsApp lo
+    descarga directo de esa URL, no hace falta subirlo primero a Meta. `filename` es el nombre
+    con el que le aparece el archivo al cliente en su chat."""
+    token = os.getenv("WHATSAPP_TOKEN")
+    url_api = f"https://graph.facebook.com/{GRAPH_API_VERSION}/{business['phone_number_id']}/messages"
+
+    try:
+        resp = requests.post(
+            url_api,
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "messaging_product": "whatsapp",
+                "to": to,
+                "type": "document",
+                "document": {"link": url, "filename": filename, **({"caption": caption} if caption else {})},
+            },
+            timeout=20,
+        )
+    except requests.RequestException as exc:
+        log.exception("Fallo de red enviando documento a WhatsApp")
+        alert_daniel(business, f"Fallo de red al enviar el archivo '{filename}' a {to}: {exc}")
+        log_event(business["name"], "error_envio")
+        return
+
+    if resp.status_code >= 400:
+        log.error("Error enviando documento a WhatsApp: %s %s", resp.status_code, resp.text)
+        alert_daniel(business, f"Fallo al enviar el archivo '{filename}' a {to}: HTTP {resp.status_code} — {resp.text[:200]}")
+        log_event(business["name"], "error_envio")
+    else:
+        log_event(business["name"], "archivo_enviado")
 
 
 def alert_daniel(business: dict | None, message: str) -> None:
@@ -1072,6 +1109,23 @@ def _handle_agent_action(business: dict, wa_id: str, action: dict) -> None:
         _notify_duda_sin_responder(business, action["pregunta"])
         log_event(business["name"], "duda_sin_responder")
 
+    elif action["type"] == "enviar_archivo":
+        # Mandar el documento como adjunto real solo está implementado para WhatsApp (lo que se
+        # necesitaba hoy). Para web/Messenger, en vez de fallar en silencio, se manda el link
+        # como texto — no es la misma experiencia pero el cliente sí recibe el archivo.
+        if wa_id.startswith(MESSENGER_PREFIX):
+            psid = wa_id[len(MESSENGER_PREFIX):]
+            send_messenger_message(
+                business.get("messenger_page_id", ""), psid,
+                f"Aquí tienes {action['nombre']}: {action['url']}",
+                business.get("messenger_page_token"),
+            )
+            log_event(business["name"], "archivo_enviado")
+        elif wa_id.startswith(WEB_VISITOR_PREFIX):
+            log_event(business["name"], "archivo_enviado")
+        else:
+            send_whatsapp_document(business, wa_id, action["url"], action["nombre"])
+
 
 def _notify_duda_sin_responder(business: dict, pregunta: str) -> None:
     """Avisa al dueño, en el momento, que su agente no supo contestarle algo a un cliente — para
@@ -1391,6 +1445,76 @@ def catalogo_eliminar():
     ok_borrado = eliminar_propiedad(negocio, folio)
     if not ok_borrado:
         return jsonify({"error": "No encontré esa propiedad."}), 404
+    return jsonify({"ok": True})
+
+
+@app.get("/api/archivos")
+def archivos():
+    """Catálogo de archivos (documentos que el bot puede mandar por WhatsApp) de un negocio,
+    para su panel en la plataforma. Incluye inactivos, a diferencia de lo que usa el propio bot.
+    Misma clave que /api/reporte."""
+    if not _chequear_report_secret():
+        return jsonify({"error": "No autorizado."}), 403
+    negocio = request.args.get("negocio", "")
+    if not negocio_existe(negocio):
+        return jsonify({"error": "Negocio no válido."}), 404
+    return jsonify({"archivos": list_archivos(negocio, solo_activos=False)})
+
+
+@app.post("/api/archivos/agregar")
+def archivos_agregar():
+    if not _chequear_report_secret():
+        return jsonify({"error": "No autorizado."}), 403
+    d = request.get_json(silent=True) or {}
+    negocio = str(d.get("negocio", ""))
+    if not negocio_existe(negocio):
+        return jsonify({"error": "Negocio no válido."}), 404
+    nombre = str(d.get("nombre", "")).strip()
+    url = str(d.get("url", "")).strip()
+    if not nombre or not url:
+        return jsonify({"error": "Faltan campos obligatorios (nombre, url)."}), 400
+    folio = add_archivo(negocio, nombre, url, str(d.get("descripcion", "")).strip())
+    if folio is None:
+        return jsonify({"error": "No se pudo guardar."}), 500
+    return jsonify({"ok": True, "folio": folio})
+
+
+@app.post("/api/archivos/editar")
+def archivos_editar():
+    if not _chequear_report_secret():
+        return jsonify({"error": "No autorizado."}), 403
+    d = request.get_json(silent=True) or {}
+    negocio = str(d.get("negocio", ""))
+    if not negocio_existe(negocio):
+        return jsonify({"error": "Negocio no válido."}), 404
+    try:
+        folio = int(d.get("folio"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Folio inválido."}), 400
+    campos = {k: v for k, v in d.items() if k in ("nombre", "url", "descripcion", "activo")}
+    if not campos:
+        return jsonify({"error": "Nada que actualizar."}), 400
+    ok_editado = editar_archivo(negocio, folio, campos)
+    if not ok_editado:
+        return jsonify({"error": "No encontré ese archivo."}), 404
+    return jsonify({"ok": True})
+
+
+@app.post("/api/archivos/eliminar")
+def archivos_eliminar():
+    if not _chequear_report_secret():
+        return jsonify({"error": "No autorizado."}), 403
+    d = request.get_json(silent=True) or {}
+    negocio = str(d.get("negocio", ""))
+    if not negocio_existe(negocio):
+        return jsonify({"error": "Negocio no válido."}), 404
+    try:
+        folio = int(d.get("folio"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Folio inválido."}), 400
+    ok_borrado = eliminar_archivo(negocio, folio)
+    if not ok_borrado:
+        return jsonify({"error": "No encontré ese archivo."}), 404
     return jsonify({"ok": True})
 
 

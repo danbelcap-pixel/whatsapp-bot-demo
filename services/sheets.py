@@ -33,6 +33,8 @@ SUMMARY_HEADERS = [
     "Tokens caché creado", "Tokens caché leído",
     # Agregada al final por la misma razón que el bloque de arriba: no mover ningún índice existente.
     "Dudas sin responder",
+    # Misma razón: agregada al final, nunca insertada en medio.
+    "Archivos enviados",
 ]
 EVENT_COLUMN = {
     "mensaje_respondido": 1,
@@ -47,6 +49,7 @@ EVENT_COLUMN = {
     "cita_modificada": 9,
     "lead_registrado": 11,
     "duda_sin_responder": 17,
+    "archivo_enviado": 18,
 }
 COL_CONVERSACIONES = 12
 COL_TOKENS_ENTRADA = 13
@@ -54,6 +57,7 @@ COL_TOKENS_SALIDA = 14
 COL_TOKENS_CACHE_CREADO = 15
 COL_TOKENS_CACHE_LEIDO = 16
 COL_DUDAS_SIN_RESPONDER = 17
+COL_ARCHIVOS_ENVIADOS = 18
 
 CITAS_HEADERS = ["Folio", "Fecha", "customer_wa_id", "nombre", "servicio", "horario", "estado", "correo", "negocio_cliente", "Google Event ID"]
 _INACTIVE_STATES = ("rechazada", "cancelada_por_cliente")
@@ -824,6 +828,102 @@ def eliminar_propiedad(business_name: str, folio: int) -> bool:
     """Borrado suave: marca la propiedad como inactiva en vez de borrar la fila, para no perder
     el historial. El bot ya no la muestra ni la usa (list_propiedades solo trae activas)."""
     return editar_propiedad(business_name, folio, {"activa": False})
+
+
+# ─── Archivos (documentos que el bot puede mandar por WhatsApp) ────────────
+# Mismo patrón que Propiedades: un negocio puede tener varios archivos disponibles a la vez
+# (póliza, cotización, menú, catálogo en PDF...), cada uno con un nombre corto que el dueño
+# elige — el bot lo usa para que Claude decida a cuál se refiere el cliente (ver ENVIAR_ARCHIVO_TOOL
+# en agent/client.py), sin importar acentos/mayúsculas/errores de dedo en cómo lo pida el cliente.
+
+ARCHIVOS_HEADERS = ["Folio", "Nombre", "URL", "Descripcion", "Activo"]
+
+
+def _archivos_tab_name(business_name: str) -> str:
+    return f"{business_name} - Archivos"
+
+
+def _row_to_archivo(row: list, row_number: int) -> dict:
+    return {
+        "row_number": row_number,
+        "folio": row[0] if len(row) > 0 else "",
+        "nombre": row[1].strip() if len(row) > 1 else "",
+        "url": row[2].strip() if len(row) > 2 else "",
+        "descripcion": row[3].strip() if len(row) > 3 else "",
+        "activo": (row[4].strip().upper() if len(row) > 4 else "SI") not in ("NO", "FALSE", "0"),
+    }
+
+
+def add_archivo(business_name: str, nombre: str, url: str, descripcion: str = "") -> int | None:
+    """Agrega un archivo al catálogo del negocio. `nombre` es la etiqueta corta (ej. 'poliza')
+    con la que el dueño lo identifica y con la que Claude lo reconoce cuando un cliente lo pide.
+    Devuelve el folio."""
+    sheet_id = os.getenv("GOOGLE_SHEET_ID")
+    if not sheet_id:
+        return None
+    try:
+        tab = _archivos_tab_name(business_name)
+        _ensure_tab_exists(sheet_id, tab, ARCHIVOS_HEADERS)
+        rows = _values_get(sheet_id, f"'{tab}'!A2:A")
+        folio = len(rows) + 1
+        row = [folio, _safe_cell(nombre), _safe_cell(url), _safe_cell(descripcion), "SI"]
+        _values_append(sheet_id, f"'{tab}'!A1", [row])
+        return folio
+    except Exception:
+        log.exception("No se pudo agregar el archivo en Google Sheets")
+        return None
+
+
+def list_archivos(business_name: str, solo_activos: bool = True) -> list[dict]:
+    """Catálogo completo de archivos disponibles de este negocio, para que el bot sepa qué le
+    puede mandar al cliente."""
+    sheet_id = os.getenv("GOOGLE_SHEET_ID")
+    if not sheet_id:
+        return []
+    try:
+        tab = _archivos_tab_name(business_name)
+        _ensure_tab_exists(sheet_id, tab, ARCHIVOS_HEADERS)
+        rows = _values_get(sheet_id, f"'{tab}'!A2:E")
+        archivos = [_row_to_archivo(row, i) for i, row in enumerate(rows, start=2) if row]
+        return [a for a in archivos if a["activo"]] if solo_activos else archivos
+    except Exception:
+        log.exception("No se pudo listar el catálogo de archivos de Google Sheets")
+        return []
+
+
+_COL_ARCHIVO = {"nombre": "B", "url": "C", "descripcion": "D", "activo": "E"}
+
+
+def editar_archivo(business_name: str, folio: int, campos: dict) -> bool:
+    """Actualiza uno o varios campos de un archivo existente (por su folio). `campos` es un dict
+    con cualquier combinación de las llaves de _COL_ARCHIVO. 'activo' se manda como bool (se
+    convierte a 'SI'/'NO'). Devuelve False si no encontró ese folio."""
+    sheet_id = os.getenv("GOOGLE_SHEET_ID")
+    if not sheet_id:
+        return False
+    try:
+        tab = _archivos_tab_name(business_name)
+        _ensure_tab_exists(sheet_id, tab, ARCHIVOS_HEADERS)
+        rows = _values_get(sheet_id, f"'{tab}'!A2:A")
+        idx = next((i for i, r in enumerate(rows) if r and str(r[0]) == str(folio)), None)
+        if idx is None:
+            return False
+        fila_real = idx + 2
+        for campo, valor in campos.items():
+            col = _COL_ARCHIVO.get(campo)
+            if not col:
+                continue
+            valor_final = ("SI" if valor else "NO") if campo == "activo" else _safe_cell(str(valor))
+            _values_update(sheet_id, f"'{tab}'!{col}{fila_real}", [[valor_final]], value_input_option="USER_ENTERED")
+        return True
+    except Exception:
+        log.exception("No se pudo editar el archivo en Google Sheets")
+        return False
+
+
+def eliminar_archivo(business_name: str, folio: int) -> bool:
+    """Borrado suave: marca el archivo como inactivo en vez de borrar la fila."""
+    return editar_archivo(business_name, folio, {"activo": False})
 
 
 # ─── Config de negocios (multi-tenant) ──────────────────────────────────

@@ -8,7 +8,7 @@ from anthropic import Anthropic
 from services.memory import get_business_notice
 from services.memory import get_history as _load_history
 from services.memory import save_history as _save_history
-from services.sheets import get_customer_active_appointments, get_propiedad_por_referencia, list_propiedades, log_tokens
+from services.sheets import get_customer_active_appointments, get_propiedad_por_referencia, list_archivos, list_propiedades, log_tokens
 
 log = logging.getLogger("whatsapp-bot")
 
@@ -244,6 +244,42 @@ DUDA_TOOL = {
 # Igual que LEAD_TOOLS: siempre disponible, sin importar si el negocio usa citas.
 DUDA_TOOLS = [DUDA_TOOL]
 
+
+def _archivo_tool(archivos: list[dict]) -> dict:
+    """Tool dinámica, armada solo si el negocio tiene al menos un archivo activo en su catálogo
+    (ver list_archivos en services/sheets.py). El "nombre" se restringe a un enum con los nombres
+    EXACTOS del catálogo — así es Claude quien decide a cuál se refiere el cliente (p.ej. "poliza"
+    sin acento, con mayúsculas distintas, o con errores de dedo, todos deben mapear al mismo
+    nombre real del catálogo), en vez de depender de una comparación de texto exacta en código,
+    que fallaría ante cualquier variación de cómo lo escriba el cliente."""
+    nombres = [a["nombre"] for a in archivos]
+    lista = "\n".join(f"- \"{a['nombre']}\"" + (f": {a['descripcion']}" if a.get("descripcion") else "") for a in archivos)
+    return {
+        "name": "enviar_archivo",
+        "description": (
+            "Manda por WhatsApp un archivo/documento del catálogo de este negocio (ej. una "
+            "póliza, cotización, menú, catálogo en PDF) cuando el cliente lo pide, aunque lo "
+            "escriba sin acentos, con mayúsculas distintas, o con algún error de dedo — identifica "
+            "a cuál de la lista se refiere por significado, no por coincidencia exacta de texto. "
+            f"Archivos disponibles ahora mismo:\n{lista}\n"
+            "Si el cliente pide un archivo que no está en esta lista, o no queda claro a cuál se "
+            "refiere entre varios parecidos, NO uses esta herramienta — dile honestamente que no "
+            "tienes ese archivo disponible (y usa avisar_duda_sin_responder) o pregúntale cuál de "
+            "los disponibles quiere."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "nombre": {
+                    "type": "string",
+                    "enum": nombres,
+                    "description": "El nombre EXACTO (tal cual aparece en el catálogo de arriba) del archivo que se debe mandar.",
+                },
+            },
+            "required": ["nombre"],
+        },
+    }
+
 ANNOUNCEMENT_TOOL = {
     "name": "actualizar_aviso_negocio",
     "description": (
@@ -454,6 +490,7 @@ def _system_prompt(
     zona_horaria: str = "America/Mexico_City",
     propiedades: list[dict] | None = None,
     propiedad_referida: dict | None = None,
+    archivos: list[dict] | None = None,
 ) -> str:
     info_texto = (
         f"\nINFORMACIÓN DE ESTE NEGOCIO — úsala para contestar preguntas de "
@@ -481,6 +518,18 @@ def _system_prompt(
                 f"que pregunta por ella a menos que mencione claramente otra cosa distinta, y no "
                 f"le preguntes cuál le interesa, ya lo sabes:\n{_linea_propiedad(propiedad_referida)}\n"
             )
+
+    archivos_texto = ""
+    if archivos:
+        lineas = "\n".join(
+            f"- \"{a['nombre']}\"" + (f": {a['descripcion']}" if a.get("descripcion") else "")
+            for a in archivos
+        )
+        archivos_texto = (
+            f"\nARCHIVOS QUE PUEDES MANDAR por WhatsApp con la herramienta enviar_archivo "
+            f"(identifica cuál quiere el cliente por significado, sin importar acentos, "
+            f"mayúsculas o errores de dedo en cómo lo escriba):\n{lineas}\n"
+        )
 
     tono_texto = (
         f"\nTONO Y ESTILO QUE DEBES USAR CON ESTE NEGOCIO: {tono}\n"
@@ -580,6 +629,7 @@ símbolos literales y se ve mal. Escribe siempre en texto plano, usando
 emojis o saltos de línea si quieres organizar la idea.
 {info_texto}
 {propiedades_texto}
+{archivos_texto}
 {tono_texto}
 {objetivo_texto}
 {aviso_texto}
@@ -667,10 +717,13 @@ def _call_claude(
     zona_horaria: str = "America/Mexico_City",
     propiedades: list[dict] | None = None,
     propiedad_referida: dict | None = None,
+    archivos: list[dict] | None = None,
     force_any_tool: bool = False,
 ) -> tuple[list[dict], str, dict | None]:
     """Llama a Claude y devuelve (content_serializable, texto, tool_use_block)."""
     tools = (ALL_TOOLS if permite_citas else []) + LEAD_TOOLS + DUDA_TOOLS
+    if archivos:
+        tools = tools + [_archivo_tool(archivos)]
     message = get_client().messages.create(
         model=MODEL,
         max_tokens=MAX_TOKENS,
@@ -682,6 +735,7 @@ def _call_claude(
                     tono=tono, objetivo=objetivo, permite_citas=permite_citas,
                     canal=canal, zona_horaria=zona_horaria,
                     propiedades=propiedades, propiedad_referida=propiedad_referida,
+                    archivos=archivos,
                 ),
                 "cache_control": {"type": "ephemeral"},
             }
@@ -746,6 +800,7 @@ def ask_agent(
     zona_horaria = business.get("zona_horaria", "America/Mexico_City")
     propiedades = list_propiedades(negocio)
     propiedad_referida = get_propiedad_por_referencia(negocio, referral_ref) if referral_ref else None
+    archivos = list_archivos(negocio)
     # El chat de página web y el de Messenger usan sus propios prefijos de wa_id, definidos en
     # main.py (WEB_VISITOR_PREFIX = "web:", MESSENGER_PREFIX = "messenger:") — si esos prefijos
     # cambian allá, hay que actualizarlos aquí también.
@@ -766,6 +821,7 @@ def ask_agent(
         negocio, info_negocio, history, citas_activas, aviso_negocio,
         tono=tono, objetivo=objetivo, permite_citas=permite_citas, canal=canal,
         zona_horaria=zona_horaria, propiedades=propiedades, propiedad_referida=propiedad_referida,
+        archivos=archivos,
     )
     history.append({"role": "assistant", "content": content})
 
@@ -781,7 +837,7 @@ def ask_agent(
             negocio, info_negocio, history[:-1], citas_activas, aviso_negocio,
             tono=tono, objetivo=objetivo, permite_citas=permite_citas,
             canal=canal, zona_horaria=zona_horaria, propiedades=propiedades,
-            propiedad_referida=propiedad_referida, force_any_tool=True,
+            propiedad_referida=propiedad_referida, archivos=archivos, force_any_tool=True,
         )
         if retry_tool_block:
             content, tool_block = retry_content, retry_tool_block
@@ -833,6 +889,17 @@ def ask_agent(
             # cliente por un texto enlatado: su propia respuesta honesta ("no sé ese dato") ya es
             # la correcta — esta herramienta solo dispara el aviso al dueño por separado.
             reply = text or "No tengo ese dato a la mano, pero ya le avisé al negocio para que te confirme."
+        elif name == "enviar_archivo":
+            archivo = next((a for a in archivos if a["nombre"] == inp["nombre"]), None)
+            if archivo:
+                action = {"type": "enviar_archivo", "nombre": archivo["nombre"], "url": archivo["url"]}
+                reply = text or f"Claro, te mando {archivo['nombre']} en un momento 📎"
+            else:
+                # Blindaje: Claude no debería poder mandar un nombre fuera del enum, pero si el
+                # catálogo cambió a media conversación (se borró justo ese archivo), no se manda
+                # nada roto — se cae al texto normal sin acción.
+                action = None
+                reply = text or "Dame un momento, voy a confirmar ese archivo contigo."
         else:  # registrar_interesado
             action = {
                 "type": "lead", "nombre": inp["nombre"],
